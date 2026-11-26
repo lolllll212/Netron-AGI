@@ -99,24 +99,26 @@ class ReversibleTransform:
         args: list[Any],
         kwargs: dict[str, Any],
     ) -> ManifoldState:
+        execution = self.vm.execution
         previous = manifold.snapshot()
-        self.vm.inverse_stack.append((self.decl.name, manifold.name, previous))
-        context = self.vm.transform_context(self.decl, manifold, args, kwargs)
+        execution.inverse_stack.append((self.decl.name, manifold.name, previous))
+        context = execution.transform_context(self.decl, manifold, args, kwargs)
         for stmt in self.decl.body:
-            self.vm.execute_transform_statement(stmt, context)
+            execution.execute_transform_statement(stmt, context)
         return manifold
 
     def uncall(self, manifold: ManifoldState | None = None) -> ManifoldState | None:
-        for index in range(len(self.vm.inverse_stack) - 1, -1, -1):
-            name, manifold_name, snapshot = self.vm.inverse_stack[index]
+        execution = self.vm.execution
+        for index in range(len(execution.inverse_stack) - 1, -1, -1):
+            name, manifold_name, snapshot = execution.inverse_stack[index]
             if name != self.decl.name:
                 continue
             if manifold is not None and manifold.name != manifold_name:
                 continue
-            target = manifold or self.vm.manifolds.get(manifold_name)
+            target = manifold or execution.manifolds.get(manifold_name)
             if target is not None:
                 target.restore(snapshot)
-            del self.vm.inverse_stack[index]
+            del execution.inverse_stack[index]
             return target
         return manifold
 

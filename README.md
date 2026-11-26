@@ -51,19 +51,27 @@ early_agi/
 │   ├── expressions.py      # safe tri-state evaluator (no eval)
 │   ├── ir.py               # compact bytecode IR
 │   ├── compiler.py         # checked AST -> deterministic VM instructions
-│   ├── synthesizer.py      # Step-4 self-invention hook
+│   ├── synthesizer.py      # replay-gated promotion + hot-chain fusion
 │   ├── runtime.py          # manifolds, candidate views, inverse frames
-│   ├── vm.py               # hybrid VM over the real subsystems
+│   ├── errors.py           # shared runtime error
+│   ├── builtins.py         # safe expression functions and GaugeGate
+│   ├── state.py            # workspace/manifold views and inverse snapshots
+│   ├── traps.py            # trap aliasing, uncall, and rollback
+│   ├── instructions.py     # opcode handlers
+│   ├── results.py          # structured run report
+│   ├── vm.py               # thin bytecode dispatcher / public API
 │   └── cli.py              # python -m early_agi.gauge / gauge console script
 ├── operators/
 │   ├── registry.py         # non-commuting tools + write isolation
 │   └── dark_state.py       # AST / Ruff / pytest / Z3 verifiers
 ├── memory/
 │   ├── mera_graph.py       # scale-indexed SQLite renormalisation store
-│   └── reflex.py           # recurring gated edits → zero-LLM replays
+│   └── reflex.py           # gated edit + operator-chain replay reflexes
 ├── backends/
 │   ├── base.py             # RelaxationBackend protocol
-│   └── classical_svd.py    # O(n·χ³) numpy backend
+│   ├── classical_svd.py    # dense numpy SVD baseline
+│   ├── bounded_chi.py      # randomized truncation, streaming MPDO, block Gibbs
+│   └── thrml_backend.py    # optional THRML/JAX adapter seam
 ├── llm/
 │   ├── client.py           # stdlib OpenAI-compatible chat client
 │   └── router.py           # fast executor / deep reasoner + scripted stand-in
@@ -93,10 +101,12 @@ python -m early_agi.gauge run examples/netron_solve.gauge --root . --output run.
 ```
 
 `check` reports static algebra/reversibility errors. `compile` shows the exact
-bytecode IR. `run` executes the IR against the SQLite cold sink, SVD backend,
-governor, dark-state predicates, operator registry, and MERA graph. All commands
-are offline; `run` uses an in-memory sink by default. See [docs/gauge.md](docs/gauge.md)
-for the language specification and subsystem mapping.
+bytecode IR. `run` dispatches the IR against the SQLite cold sink, configurable
+relaxation backend, governor, dark-state predicates, operator registry, and MERA
+graph. Operator synthesis is replay-gated, and successful extern-op chains can
+fuse into deterministic reflexes. All commands are offline; `run` uses an
+in-memory sink by default. See [docs/gauge.md](docs/gauge.md) for the language
+specification, VM module boundaries, and subsystem mapping.
 
 ## Run the kernel and tests
 
@@ -186,16 +196,21 @@ identical fingerprints.
 **Scale memory.** `MeraGraph.coarse_grain()` builds a gate/directive feature
 matrix, calls the configured backend's `truncate()` and `left_basis()`, and
 partitions records by orthant in the Schmidt basis, emitting `rule` nodes at
-`scale+1` with edges back to members. Coarse nodes go through the sink.
+`scale+1` with edges back to members. `get_backend("bounded_chi")` provides a
+randomized rank-capped alternative plus deterministic Ising block-Gibbs sampling;
+THRML/JAX remains an optional adapter, never a required dependency.
 
 **Reflexes.** `memory/reflex.py` compiles an edit batch into a replayable
-procedure once it has won `min_support` times and every win passed a gate. A
-reflex fires only when the task signature, target pre-state hashes, and expected
-gates all match. Failed replays are restored and repeated misses retire it.
+procedure once it has won `min_support` times and every win passed a gate. It
+also fuses repeated gate-green Gauge operator chains into deterministic
+`fused_*` registry operators linked to their source ticks. A file reflex fires
+only when the task signature, target pre-state hashes, and expected gates all
+match. Failed replays are restored and repeated misses retire it.
 
 **Gauge.** The language keeps policy and constraint graphs out of hardcoded
-Python loops. `.gauge` scripts compile to deterministic IR; the VM owns control
-flow and calls existing subsystems. See [docs/gauge.md](docs/gauge.md).
+Python loops. `.gauge` scripts compile to deterministic IR; `vm.py` is a thin
+dispatcher with focused modules for instructions, state, built-ins, traps, and
+results. See [docs/gauge.md](docs/gauge.md).
 
 ## Limitations
 
@@ -210,7 +225,9 @@ flow and calls existing subsystems. See [docs/gauge.md](docs/gauge.md).
 - Reflexes replay recorded full-file contents and are pinned to seen task
   signatures and pre-states; they do not generalise to renamed symbols.
 - Gauge's default synthesizer is deterministic and offline. An optional router
-  can propose an operator, but the VM still requires a positive measured gain.
+  can propose an operator, but promotion still requires isolated replay,
+  strict `eta_cog` improvement, and green dark-state gates. THRML is an
+  optional adapter; the bundled sampler is pure Python/NumPy.
 
 ## Project policies
 

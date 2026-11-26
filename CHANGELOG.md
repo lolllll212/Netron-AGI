@@ -9,14 +9,25 @@ All notable changes to this project are documented here. The format follows
 ### Added
 
 - **Gauge**, a custom cognitive and thermodynamic orchestration language: span-tagged lexer/AST/parser, static algebra and reversibility checker, safe tri-state expression evaluator, compact bytecode IR/compiler, hybrid VM, CLI (`python -m early_agi.gauge`), docs, and `examples/netron_solve.gauge`.
-- Gauge Step-4 operator synthesis with a deterministic offline default, optional router hook, restricted execution, and mandatory positive efficiency improvement before registration.
+- Gauge Step-4 replay-gated operator synthesis: isolated `python -I` benchmarking against recent high-drag cold-sink episodes, strict `eta_cog` improvement, green `DarkStateGate` checks, promotion records, and optional router-authored candidates.
+- Gauge VM decomposition: `builtins.py`, `state.py`, `traps.py`, `instructions.py`, `results.py`, and `errors.py` leave `vm.py` as the bytecode dispatcher.
+- Pure-Python `bounded_chi` relaxation backend with randomized/iterative rank-capped truncation, streaming MPDO-style updates, deterministic two-colour Ising block-Gibbs sampling, and optional THRML adapter seams (`thrml`, `thrml_informed`).
+- Deterministic operator-chain reflexes in `memory/reflex.py`: repeated gate-green extern-op chains fuse into registry operators and MERA nodes linked to source ticks.
+- Split Gauge test modules for parser precedence/spans/malformed syntax, checker algebra/no-leak/reversibility, compiler IR lowering, VM trap escalation/collapse replay, replay-gated synthesis, and bounded-χ backends.
 - `Settings.build_runtime()`, strict environment validation, `.env` loading, explicit `EARLY_AGI_LLM_ENABLED` opt-in, and complete wiring of physics/storage/scan settings into the demo.
 - Real Z3 SMT-LIB2 solving with `unsat`/`sat`/`unknown` mapped to true tri-state verifier results.
 - `docs/gauge.md`, `CONTRIBUTING.md`, `SECURITY.md`, and an MIT `LICENSE`.
 - Regression tests for Gauge parsing/checking/compiling/running, transactional rollback, allowlists, task-aware reflexes, config, JSON extraction, backend use, cold-sink metadata, wildcard commutator audits, semantic shift artifacts, and deep-tier cost accounting.
 
+### Changed
+
+- `GaugeRunResult` now reports `run_index`, fused-reflex summaries, and rich synthesis replay metadata.
+- Gauge expression built-ins, workspace/manifold state, trap evaluation, inverse-stack rollback, and opcode handlers are no longer embedded in the VM dispatcher.
+- `docs/gauge.md`, `README.md`, `SECURITY.md`, and this changelog now describe the replay gate, bounded-χ backend, and optional THRML seam.
+
 ### Fixed
 
+- Gauge `recall sink` now includes `gauge_collapse` records regardless of the infrared collapse scale, so `collapse -> sink` can be replayed on later ticks.
 - Enforced the brief file allowlist in both live-router parsing and the session write path.
 - Made edit batches transactional: partial write failures restore workspace bytes, kernel checkpoints, gate state, and registry bookkeeping.
 - Reconciled gate state after recall/revert so a rolled-back branch cannot award the same verified bits twice.

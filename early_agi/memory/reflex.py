@@ -25,19 +25,23 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..core.cold_sink import SinkRecord, canonical_json
+from ..operators.registry import OperatorSpec
 from .mera_graph import MeraGraph
 
 __all__ = [
+    "CompiledOperatorReflex",
     "CompiledReflex",
+    "OperatorReflexCompileReport",
     "ReflexCompileReport",
     "ReflexEdit",
     "ReflexLibrary",
+    "compile_operator_reflexes",
     "compile_reflexes",
     "content_sha",
     "task_signature",
@@ -151,6 +155,50 @@ class ReflexCompileReport:
             "batches": self.batches,
             "signatures": self.signatures,
             "reflexes": self.reflexes,
+            "skipped": list(self.skipped),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledOperatorReflex:
+    """A deterministic reflex compiled from a repeated Gauge extern-op chain."""
+
+    hash: str
+    name: str
+    chain: tuple[str, ...]
+    signature: str
+    support: int
+    fused_operator: str
+    expected_gates: tuple[str, ...] = ()
+    task_signatures: tuple[str, ...] = ()
+    eta_mean: float | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "hash": self.hash[:10],
+            "name": self.name,
+            "chain": list(self.chain),
+            "signature": self.signature,
+            "support": self.support,
+            "fused_operator": self.fused_operator,
+            "expected_gates": list(self.expected_gates),
+            "task_signatures": list(self.task_signatures),
+            "eta_mean": self.eta_mean,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorReflexCompileReport:
+    signatures: int = 0
+    fused: int = 0
+    operators: tuple[str, ...] = ()
+    skipped: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "signatures": self.signatures,
+            "fused": self.fused,
+            "operators": list(self.operators),
             "skipped": list(self.skipped),
         }
 
@@ -305,6 +353,138 @@ def compile_reflexes(
     )
 
 
+def _chain_signature(chain: Sequence[str]) -> str:
+    return hashlib.sha256(canonical_json(list(chain)).encode("utf-8")).hexdigest()[:16]
+
+
+def _chain_passing(payload: Mapping[str, Any]) -> set[str]:
+    gates = payload.get("gates") or {}
+    return {str(name) for name, verdict in gates.items() if verdict == "pass"}
+
+
+def _chain_succeeded(record: SinkRecord) -> bool:
+    payload = record.payload
+    verdicts = [str(verdict) for verdict in (payload.get("gates") or {}).values()]
+    return payload.get("ok") is True and all(verdict != "fail" for verdict in verdicts)
+
+
+def _operator_fused_fn(name: str, chain: tuple[str, ...]):
+    def fused_fn(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "fused": True,
+            "reflex": name,
+            "chain": list(chain),
+            "state_keys": sorted(kwargs),
+        }
+
+    return fused_fn
+
+
+def compile_operator_reflexes(
+    graph: MeraGraph,
+    registry: Any | None = None,
+    *,
+    sink: Any | None = None,
+    min_support: int = 2,
+    limit: int = 2000,
+) -> OperatorReflexCompileReport:
+    """Fuse repeated, successful Gauge ``extern op`` chains into reflexes.
+
+    Evidence comes from ``gauge_op_chain`` sink records. A chain must succeed in
+    at least ``min_support`` distinct ticks with no failing dark-state gate; the
+    compiled node is linked to every source tick and optionally installed as a
+    deterministic ``OperatorSpec`` in the supplied registry.
+    """
+    if min_support < 1:
+        raise ValueError("min_support must be >= 1")
+    store = sink or graph.sink
+    records = store.records(kinds=("gauge_op_chain",), limit=limit)
+    groups: dict[str, list[SinkRecord]] = {}
+    skipped: list[str] = []
+
+    for record in records:
+        payload = record.payload
+        chain = tuple(str(item) for item in payload.get("chain", ()))
+        if not chain:
+            skipped.append(f"chain {record.short} has no operators")
+            continue
+        if not _chain_succeeded(record):
+            skipped.append(f"chain {record.short} was not gate-green")
+            continue
+        signature = str(payload.get("signature") or _chain_signature(chain))
+        groups.setdefault(signature, []).append(record)
+
+    fused: list[str] = []
+    for signature, members in sorted(groups.items()):
+        chain = tuple(str(item) for item in members[0].payload.get("chain", ()))
+        ticks = sorted(
+            {
+                str(
+                    record.payload.get("tick")
+                    or record.parent_hash
+                    or record.payload.get("sequence")
+                    or record.hash
+                )
+                for record in members
+            }
+        )
+        if len(ticks) < min_support:
+            skipped.append(f"{signature[:8]}: only {len(ticks)} distinct winning ticks")
+            continue
+        etas = [
+            float(record.eta_cog if record.eta_cog is not None else record.payload.get("eta", 0.0) or 0.0)
+            for record in members
+        ]
+        eta_mean = round(sum(etas) / len(etas), 6) if etas else None
+        pass_sets = [_chain_passing(record.payload) for record in members]
+        expected = sorted(set.intersection(*pass_sets)) if pass_sets else []
+        task_signatures = sorted(
+            {
+                signature_value
+                for record in members
+                if (signature_value := task_signature(str(record.payload.get("task") or "")))
+            }
+        )
+        name = f"fused_{signature[:8]}"
+        digest = graph.put_node(
+            "operator_chain_reflex",
+            {
+                "name": name,
+                "chain": list(chain),
+                "signature": signature,
+                "support": len(ticks),
+                "ticks": ticks,
+                "eta_mean": eta_mean,
+                "expected_gates": expected,
+                "task_signatures": task_signatures,
+                "fused_operator": name,
+            },
+            scale=1,
+            eta_cog=eta_mean,
+        )
+        for tick in ticks:
+            graph.link(tick, digest, "compiled_from")
+        if registry is not None:
+            registry.replace(
+                OperatorSpec(
+                    name=name,
+                    fn=_operator_fused_fn(name, chain),
+                    kind="READ",
+                    reads=frozenset({"coordinate/*"}),
+                    cost=0.0,
+                    description=f"synthesized fused Gauge reflex {signature[:8]}",
+                )
+            )
+        fused.append(name)
+
+    return OperatorReflexCompileReport(
+        signatures=len(groups),
+        fused=len(fused),
+        operators=tuple(fused),
+        skipped=tuple(skipped),
+    )
+
+
 class ReflexLibrary:
     """Read-side view over compiled reflexes, plus the fire/retire bookkeeping."""
 
@@ -314,6 +494,68 @@ class ReflexLibrary:
 
     def compile(self, *, min_support: int = 2, limit: int = 2000) -> ReflexCompileReport:
         return compile_reflexes(self.graph, min_support=min_support, limit=limit)
+
+    def compile_operator_chains(
+        self,
+        registry: Any | None = None,
+        *,
+        sink: Any | None = None,
+        min_support: int = 2,
+        limit: int = 2000,
+    ) -> OperatorReflexCompileReport:
+        """Compile repeated gate-green Gauge operator chains into fused ops."""
+        return compile_operator_reflexes(
+            self.graph,
+            registry,
+            sink=sink,
+            min_support=min_support,
+            limit=limit,
+        )
+
+    def operator_reflexes(self) -> list[CompiledOperatorReflex]:
+        """Load deterministic operator-chain reflexes from the MERA graph."""
+        compiled: list[CompiledOperatorReflex] = []
+        for node in self.graph.nodes(kind="operator_chain_reflex"):
+            payload = node["payload"]
+            raw_eta = payload.get("eta_mean")
+            edges = self.graph.sources(node["hash"], "compiled_from")
+            compiled.append(
+                CompiledOperatorReflex(
+                    hash=node["hash"],
+                    name=str(payload.get("name") or f"reflex/{node['hash'][:8]}"),
+                    chain=tuple(str(item) for item in payload.get("chain", ())),
+                    signature=str(payload.get("signature") or ""),
+                    support=len(edges) or int(payload.get("support", 0)),
+                    fused_operator=str(payload.get("fused_operator") or ""),
+                    expected_gates=tuple(str(item) for item in payload.get("expected_gates", ())),
+                    task_signatures=tuple(
+                        str(item) for item in payload.get("task_signatures", ()) if isinstance(item, str)
+                    ),
+                    eta_mean=float(raw_eta) if raw_eta is not None else None,
+                )
+            )
+        return sorted(
+            compiled,
+            key=lambda reflex: (reflex.support, len(reflex.expected_gates), reflex.name),
+            reverse=True,
+        )
+
+    def match_operator_chain(
+        self,
+        chain: Sequence[str],
+        *,
+        task: str | None = None,
+    ) -> CompiledOperatorReflex | None:
+        """Find an exact deterministic reflex for an extern-op chain."""
+        wanted = tuple(str(item) for item in chain)
+        signature = task_signature(task) if task is not None else None
+        for reflex in self.operator_reflexes():
+            if reflex.chain != wanted:
+                continue
+            if signature is not None and signature not in reflex.task_signatures:
+                continue
+            return reflex
+        return None
 
     # -- loading ------------------------------------------------------------
     def _outcomes(self) -> dict[str, list[bool]]:

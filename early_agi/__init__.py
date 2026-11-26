@@ -5,8 +5,8 @@ on how entanglement is measured:
 
     core/       deterministic execution (cold sink, sensor, governor, kernel)
     operators/  non-commuting tools + dark-state verifiers
-    backends/   swappable relaxation backends (numpy SVD today, tensor networks
-                or p-bit simulators later)
+    backends/   swappable relaxation backends (classical SVD, bounded-χ
+                randomized truncation, and block-Gibbs/THRML seams)
     memory/     scale-indexed MERA store over the cold sink
     llm/        OpenAI-compatible dual-tier client + router
 

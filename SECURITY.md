@@ -25,9 +25,10 @@ The following controls are enabled by default:
   registry write boundary, not merely in the planner.
 - Gauge expressions are interpreted by a small tri-state evaluator. Python
   `eval()` is not used.
-- Synthesized operators are AST-restricted, executed with a minimal builtins
-  namespace, checked for input mutation, and registered only after a positive
-  efficiency improvement.
+- Synthesized operators are AST-restricted, benchmarked in an isolated
+  `python -I` subprocess with a minimal builtins namespace, replayed against
+  high-drag cold-sink states, checked for input mutation, and registered only
+  after strictly positive `eta_cog` improvement and green dark-state gates.
 - Cold-sink SQLite triggers reject `UPDATE` and `DELETE`; reads can be re-hashed.
   Even deduplicated payloads retain all metadata commits.
 - Z3 and pytest failures/timeouts are tri-state `unverifiable`, not a fake pass.
