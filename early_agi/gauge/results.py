@@ -13,6 +13,8 @@ class GaugeRunResult:
     status: str
     program: str
     root: str
+    backend: str = "classical_svd"
+    backend_impl: str = "classical_svd"
     run_index: int = 0
     trace: list[dict[str, Any]] = field(default_factory=list)
     gates: dict[str, str] = field(default_factory=dict)
@@ -43,6 +45,8 @@ class GaugeRunResult:
             "ok": self.ok,
             "program": self.program,
             "root": self.root,
+            "backend": self.backend,
+            "backend_impl": self.backend_impl,
             "run_index": self.run_index,
             "trace": self.trace,
             "gates": self.gates,

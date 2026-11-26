@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Added `EARLY_AGI_BACKEND` / `Settings.backend` and `--backend` selectors for `classical_svd`, `bounded_chi`, and the `thrml` adapter seams.
+- Wired the selected backend through `build_runtime()`, `GaugeVM`, Gauge results, and the offline demo; added an optional `[thrml]` extra and CI smoke coverage.
 - **Gauge**, a custom cognitive and thermodynamic orchestration language: span-tagged lexer/AST/parser, static algebra and reversibility checker, safe tri-state expression evaluator, compact bytecode IR/compiler, hybrid VM, CLI (`python -m early_agi.gauge`), docs, and `examples/netron_solve.gauge`.
 - Gauge Step-4 replay-gated operator synthesis: isolated `python -I` benchmarking against recent high-drag cold-sink episodes, strict `eta_cog` improvement, green `DarkStateGate` checks, promotion records, and optional router-authored candidates.
 - Gauge VM decomposition: `builtins.py`, `state.py`, `traps.py`, `instructions.py`, `results.py`, and `errors.py` leave `vm.py` as the bytecode dispatcher.

@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .backends import available_backends, get_backend
+
 DEFAULT_BASE_URL = "http://localhost:11434/v1"
 _ENV_PREFIX = "EARLY_AGI_"
 
@@ -118,11 +120,12 @@ class RuntimeBundle:
     kernel: Any
     graph: Any
     scanner: Any
+    backend: Any = None
 
 
 @dataclass(frozen=True)
 class Settings:
-    """Runtime knobs for the kernel, memory, scanner, and the LLM layer."""
+    """Runtime knobs for the kernel, memory, scanner, backend, and the LLM layer."""
 
     base_url: str = DEFAULT_BASE_URL
     api_key: str = ""
@@ -140,6 +143,8 @@ class Settings:
     max_files: int = 200
     llm_enabled: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
+    # Appended so existing positional Settings(...) constructions keep their meaning.
+    backend: str = "classical_svd"
 
     @classmethod
     def from_env(
@@ -172,6 +177,7 @@ class Settings:
             temperature=_float(source, "EARLY_AGI_TEMPERATURE", 0.0, minimum=0.0, maximum=2.0),
             chi_max=_int(source, "EARLY_AGI_CHI_MAX", 4, minimum=1, maximum=256),
             tau=_float(source, "EARLY_AGI_TAU", 0.15, minimum=1e-9, maximum=1.0),
+            backend=_str(source, "EARLY_AGI_BACKEND", "classical_svd"),
             eta_high=_float(source, "EARLY_AGI_ETA_HIGH", 1.2, minimum=0.0),
             eta_min=_float(source, "EARLY_AGI_ETA_MIN", 0.15, minimum=0.0),
             sink_path=_str(source, "EARLY_AGI_SINK", ":memory:"),
@@ -190,6 +196,10 @@ class Settings:
     def validate(self) -> None:
         if self.eta_min > self.eta_high:
             raise ConfigError("EARLY_AGI_ETA_MIN cannot exceed EARLY_AGI_ETA_HIGH")
+        if self.backend not in available_backends():
+            raise ConfigError(
+                f"EARLY_AGI_BACKEND must be one of {', '.join(available_backends())}; got {self.backend!r}"
+            )
         if self.base_url and not self.base_url.startswith(("http://", "https://")):
             raise ConfigError("EARLY_AGI_BASE_URL must use http:// or https://")
         if self.llm_enabled and (not self.fast_model or not self.deep_model):
@@ -217,6 +227,7 @@ class Settings:
         backend: Any | None = None,
     ) -> RuntimeBundle:
         """Construct a wired sink, kernel, MERA graph, and scanner."""
+        self.validate()
         from .core.cold_sink import ColdSink
         from .core.coupling import RepoScanner
         from .core.governor import ThermodynamicGovernor
@@ -224,9 +235,10 @@ class Settings:
         from .memory.mera_graph import MeraGraph
 
         sink = ColdSink(self.sink_path)
+        selected = backend if backend is not None else get_backend(self.backend)
         kernel = EarlyAGIKernel(
             sink,
-            backend=backend,
+            backend=selected,
             governor=ThermodynamicGovernor(eta_high=self.eta_high, eta_min=self.eta_min),
             gates=list(gates),
             registry=registry,
@@ -235,7 +247,14 @@ class Settings:
         )
         graph = MeraGraph(sink, self.mera_path, backend=kernel.backend)
         scanner = RepoScanner(root, max_files=self.max_files)
-        return RuntimeBundle(settings=self, sink=sink, kernel=kernel, graph=graph, scanner=scanner)
+        return RuntimeBundle(
+            settings=self,
+            sink=sink,
+            kernel=kernel,
+            graph=graph,
+            scanner=scanner,
+            backend=kernel.backend,
+        )
 
 
 _KNOWN_ENV = frozenset(
@@ -249,6 +268,7 @@ _KNOWN_ENV = frozenset(
         "EARLY_AGI_TEMPERATURE",
         "EARLY_AGI_CHI_MAX",
         "EARLY_AGI_TAU",
+        "EARLY_AGI_BACKEND",
         "EARLY_AGI_ETA_HIGH",
         "EARLY_AGI_ETA_MIN",
         "EARLY_AGI_SINK",

@@ -6,9 +6,11 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from ..backends import available_backends
 from ..config import Settings
 from . import (
     GaugeSemanticError,
@@ -56,6 +58,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("file", nargs="?", default="-", help="Gauge source file, or - for stdin")
     parser.add_argument("--root", default=".", help="workspace root for run (default: current directory)")
+    parser.add_argument(
+        "--backend",
+        choices=available_backends(),
+        help="relaxation backend for run (default: EARLY_AGI_BACKEND or classical_svd)",
+    )
     parser.add_argument("--output", "-o", help="write JSON to this path instead of stdout")
     parser.add_argument("--compact", action="store_true", help="emit compact JSON")
     parser.add_argument("--no-dotenv", action="store_true", help="do not load a local .env file")
@@ -85,6 +92,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             status = 0
         else:
             settings = Settings.from_env(load_dotenv=not args.no_dotenv)
+            if args.backend:
+                settings = replace(settings, backend=args.backend)
+                settings.validate()
             result = GaugeVM(args.root, settings=settings).run(source, name=args.file)
             payload = result.as_dict()
             status = 0 if result.ok else 2

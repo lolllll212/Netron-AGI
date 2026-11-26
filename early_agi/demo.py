@@ -7,8 +7,11 @@ throwaway repository.
 
 from __future__ import annotations
 
+import argparse
 import json
 import tempfile
+from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +46,7 @@ def regimes(settings: Settings | None = None) -> ColdSink:
     sink = ColdSink(settings.sink_path)
     kernel = EarlyAGIKernel(
         sink=sink,
-        backend=get_backend("classical_svd"),
+        backend=get_backend(settings.backend),
         governor=ThermodynamicGovernor(eta_high=settings.eta_high, eta_min=settings.eta_min),
         gates=[
             DarkStateGate("syntax_ok", lambda state: bool(state.get("syntax_ok")), 2.0),
@@ -146,7 +149,7 @@ def commutators() -> None:
 def mera(sink: ColdSink, settings: Settings | None = None) -> None:
     settings = settings or Settings.from_env()
     section("4. MERA consolidation: L0 traces -> L1 rules")
-    graph = MeraGraph(sink, settings.mera_path, backend=get_backend("classical_svd"))
+    graph = MeraGraph(sink, settings.mera_path, backend=get_backend(settings.backend))
     report = graph.coarse_grain(scale=0, chi_max=4)
     show("coarse-grain report", report.as_dict())
     for rule in graph.rules(scale=1):
@@ -179,6 +182,7 @@ def session_loop(settings: Settings | None = None) -> None:
         sink = ColdSink(settings.sink_path)
         kernel = EarlyAGIKernel(
             sink=sink,
+            backend=get_backend(settings.backend),
             governor=ThermodynamicGovernor(eta_high=settings.eta_high, eta_min=settings.eta_min),
             gates=[ast_syntax_gate(bits=2.0), pytest_gate(bits=4.0, timeout=120.0)],
             chi_max=settings.chi_max,
@@ -226,7 +230,10 @@ def reflex_compilation(settings: Settings | None = None) -> None:
             root = base / f"learn{index}"
             _fixture(root)
             kernel = EarlyAGIKernel(
-                sink=sink, gates=[DarkStateGate("multiplies", _multiplies(root), 4.0)], chi_max=2
+                sink=sink,
+                backend=get_backend(settings.backend),
+                gates=[DarkStateGate("multiplies", _multiplies(root), 4.0)],
+                chi_max=2,
             )
             router = ScriptedRouter(
                 [TurnProposal(edits=(Edit("calc.py", fix),), rationale="multiply, do not add")]
@@ -241,7 +248,7 @@ def reflex_compilation(settings: Settings | None = None) -> None:
                 },
             )
 
-        library = ReflexLibrary(MeraGraph(sink, settings.mera_path, backend=get_backend("classical_svd")))
+        library = ReflexLibrary(MeraGraph(sink, settings.mera_path, backend=get_backend(settings.backend)))
         show("compile report", library.compile(min_support=2).as_dict())
         for reflex in library.reflexes():
             show("  reflex", reflex.as_dict())
@@ -249,7 +256,10 @@ def reflex_compilation(settings: Settings | None = None) -> None:
         root = base / "replay"
         _fixture(root)
         kernel = EarlyAGIKernel(
-            sink=sink, gates=[DarkStateGate("multiplies", _multiplies(root), 4.0)], chi_max=2
+            sink=sink,
+            backend=get_backend(settings.backend),
+            gates=[DarkStateGate("multiplies", _multiplies(root), 4.0)],
+            chi_max=2,
         )
         router = ScriptedRouter(strict=True)  # no script left: only a reflex can act
         outcome = AgentSession(root, kernel, router, reflexes=library).turn("make mul(2, 3) return 6")
@@ -265,8 +275,62 @@ def reflex_compilation(settings: Settings | None = None) -> None:
         show("  router calls (must be empty)", {"calls": router.calls})
 
 
-def main() -> int:
-    settings = Settings.from_env()
+def backend_showcase(settings: Settings | None = None) -> None:
+    """Exercise the bounded-χ backend and its optional thermodynamic seam."""
+    settings = settings or Settings.from_env()
+    section("7. Backend seams: bounded-χ truncation and thermodynamic sampling")
+    selected = get_backend(settings.backend)
+    bounded = get_backend("bounded_chi")
+    rng = np.random.default_rng(7)
+    matrix = rng.normal(size=(8, 6))
+    rank = min(settings.chi_max, *matrix.shape)
+    factor = bounded.factorize(
+        matrix,
+        power_iterations=2,
+        oversampling=2,
+        seed=17,
+        options={"chi_max": rank},
+    )
+    report = bounded.measure_entanglement(matrix, chi_max=rank, tau=settings.tau)
+    couplings = np.array([[0.0, 1.0, 0.4], [1.0, 0.0, -0.2], [0.4, -0.2, 0.0]])
+    sample = bounded.block_gibbs(
+        couplings,
+        biases=[0.1, 0.0, -0.1],
+        beta=0.8,
+        schedule={"n_warmup": 4, "n_samples": 4, "thinning": 1, "seed": 17},
+        adapter="auto",
+    )
+    show(
+        "backend selector",
+        {
+            "settings": settings.backend,
+            "implementation": getattr(selected, "name", type(selected).__name__),
+            "available": list(available_backends()),
+        },
+    )
+    show("bounded-χ factorization", factor.as_dict())
+    show("bounded-χ entanglement", report.as_dict())
+    show("block-Gibbs sample", sample.as_dict())
+    show("THRML adapter", bounded.thrml_adapter().as_dict())
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="early-agi",
+        description="Offline end-to-end demo for the early-AGI kernel and Gauge runtime.",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=available_backends(),
+        help="relaxation backend to use (default: EARLY_AGI_BACKEND or classical_svd)",
+    )
+    parser.add_argument("--no-dotenv", action="store_true", help="ignore a local .env file")
+    args = parser.parse_args(argv)
+
+    settings = Settings.from_env(load_dotenv=not args.no_dotenv)
+    if args.backend:
+        settings = replace(settings, backend=args.backend)
+        settings.validate()
     print("early-agi demo | numpy + sqlite3 only | no network required")
     show("effective settings", settings.to_dict())
     sink = regimes(settings)
@@ -275,9 +339,11 @@ def main() -> int:
     mera(sink, settings)
     session_loop(settings)
     reflex_compilation(settings)
+    backend_showcase(settings)
     print(
-        "\nDone. Gauge scripts: python -m early_agi.gauge check examples/netron_solve.gauge. "
-        "Set EARLY_AGI_LLM_ENABLED=1 plus the endpoint/model variables for live routing."
+        "\nDone. Try --backend bounded_chi, or Gauge: "
+        "python -m early_agi.gauge run examples/netron_solve.gauge --backend bounded_chi. "
+        "Set EARLY_AGI_LLM_ENABLED=1 plus endpoint/model variables for live routing."
     )
     return 0
 

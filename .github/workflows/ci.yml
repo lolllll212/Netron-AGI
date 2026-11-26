@@ -30,6 +30,20 @@ jobs:
         run: python -m pytest
       - name: Demo (offline, no API key)
         run: python -m early_agi.demo
+      - name: Demo (bounded-χ CLI selector)
+        run: python -m early_agi.demo --backend bounded_chi --no-dotenv
+      - name: Demo (EARLY_AGI_BACKEND selector)
+        env:
+          EARLY_AGI_BACKEND: bounded_chi
+        run: python -m early_agi.demo --no-dotenv
+      - name: Backend wiring and Gauge CLI smokes
+        run: |
+          python -c "from early_agi.config import Settings; s=Settings.from_env({'EARLY_AGI_BACKEND':'bounded_chi'}, load_dotenv=False); b=s.build_runtime('.'); assert b.kernel.backend.name == 'bounded_chi', b.kernel.backend.name; assert b.backend is b.kernel.backend"
+          python -m early_agi.gauge run examples/netron_solve.gauge --root . --backend bounded_chi --compact --no-dotenv --output gauge-bounded-run.json
+          python -c "import json; d=json.load(open('gauge-bounded-run.json', encoding='utf-8')); assert d['ok'], d['violations']; assert d['backend'] == 'bounded_chi', d; assert d['backend_impl'] == 'bounded_chi', d"
+          python -m early_agi.gauge run examples/netron_solve.gauge --root . --backend thrml --compact --no-dotenv --output gauge-thrml-run.json
+          python -c "import json; d=json.load(open('gauge-thrml-run.json', encoding='utf-8')); assert d['ok'], d['violations']; assert d['backend'] == 'thrml', d; assert d['backend_impl'] in ('thrml', 'thrml_informed'), d"
+          python -c "import pathlib; t=pathlib.Path('pyproject.toml').read_text(encoding='utf-8'); assert ('thrml = [' + chr(34) + 'thrml>=0.1.4' + chr(34) + ']') in t"
       - name: Gauge frontend, IR, and VM
         run: |
           python -m early_agi.gauge check examples/netron_solve.gauge --compact --no-dotenv

@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..backends.classical_svd import ClassicalSVDBackend
+from ..backends import get_backend
 from ..config import Settings
 from ..core.cold_sink import ColdSink
 from ..core.kernel import EarlyAGIKernel
@@ -133,8 +133,19 @@ class GaugeVM:
     ) -> None:
         self.root = Path(root).resolve()
         self.settings = settings or Settings.from_env()
+        validate = getattr(self.settings, "validate", None)
+        if callable(validate):
+            validate()
         self.sink = sink or (kernel.sink if kernel is not None else ColdSink(self.settings.sink_path))
-        self.backend = backend or (kernel.backend if kernel is not None else ClassicalSVDBackend())
+        self.backend = backend or (
+            kernel.backend if kernel is not None else get_backend(self.settings.backend)
+        )
+        if backend is not None:
+            self.requested_backend = str(getattr(backend, "name", type(backend).__name__))
+        elif kernel is not None:
+            self.requested_backend = str(getattr(self.backend, "name", type(self.backend).__name__))
+        else:
+            self.requested_backend = self.settings.backend
         self.registry = registry or (kernel.registry if kernel is not None else OperatorRegistry())
         self.kernel = kernel or EarlyAGIKernel(
             self.sink,
@@ -217,6 +228,8 @@ class GaugeVM:
 
     def _bind_result_lists(self) -> None:
         execution = self.execution
+        self.result.backend = str(self.requested_backend)
+        self.result.backend_impl = str(getattr(self.backend, "name", type(self.backend).__name__))
         self.result.run_index = execution.run_index
         self.result.trace = execution.trace
         self.result.violations = execution.violations

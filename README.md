@@ -90,6 +90,7 @@ Requires Python ≥ 3.10. Nothing here needs a GPU, a model, or a network.
 python -m pip install -e .             # runtime: numpy only
 python -m pip install -e ".[dev]"      # + pytest and pinned ruff
 python -m pip install -e ".[verify]"   # + z3-solver for the SMT gate
+python -m pip install -e ".[thrml]"    # optional JAX/THRML adapter environment
 ```
 
 ## Run Gauge
@@ -98,20 +99,26 @@ python -m pip install -e ".[verify]"   # + z3-solver for the SMT gate
 python -m early_agi.gauge check examples/netron_solve.gauge
 python -m early_agi.gauge compile examples/netron_solve.gauge --output ir.json
 python -m early_agi.gauge run examples/netron_solve.gauge --root . --output run.json
+python -m early_agi.gauge run examples/netron_solve.gauge --root . --backend bounded_chi --output bounded-run.json
 ```
 
 `check` reports static algebra/reversibility errors. `compile` shows the exact
 bytecode IR. `run` dispatches the IR against the SQLite cold sink, configurable
 relaxation backend, governor, dark-state predicates, operator registry, and MERA
-graph. Operator synthesis is replay-gated, and successful extern-op chains can
-fuse into deterministic reflexes. All commands are offline; `run` uses an
-in-memory sink by default. See [docs/gauge.md](docs/gauge.md) for the language
-specification, VM module boundaries, and subsystem mapping.
+graph. Select the backend with `--backend`, `EARLY_AGI_BACKEND`, or `.env`;
+`classical_svd`, `bounded_chi`, `thrml`, `thrml_informed`, and `thrml_pbit` are
+registered. The `thrml` aliases use the bundled pure-Python block-Gibbs backend;
+the optional extra only installs a JAX/THRML adapter environment. Operator
+synthesis is replay-gated, and successful extern-op chains can fuse into
+deterministic reflexes. All commands are offline; `run` uses an in-memory sink
+by default. See [docs/gauge.md](docs/gauge.md) for the language specification,
+VM module boundaries, and subsystem mapping.
 
 ## Run the kernel and tests
 
 ```bash
-python -m early_agi.demo     # offline: all six sections, no API key
+python -m early_agi.demo     # offline: all seven sections, no API key
+python -m early_agi.demo --backend bounded_chi --no-dotenv
 python -m pytest -q          # focused unit, integration, Gauge, and regression tests
 ruff check .
 ruff format --check .
@@ -119,8 +126,10 @@ ruff format --check .
 
 The demo prints the three physical regimes, the coupling matrix of this package,
 the commutator table with a write lock being enforced, MERA consolidation, a
-transactional edit → verify → `eta_cog` → directive loop, and task-aware reflex
-compilation replaying a learned fix with zero router calls.
+transactional edit → verify → `eta_cog` → directive loop, task-aware reflex
+compilation replaying a learned fix with zero router calls, and a bounded-χ
+factorization/block-Gibbs backend exercise. `--backend` or `EARLY_AGI_BACKEND`
+selects the relaxation backend used by the kernel, MERA graph, and Gauge runtime.
 
 ### Live models
 
@@ -135,9 +144,10 @@ export EARLY_AGI_DEEP_MODEL=qwen2.5-coder:32b
 # export EARLY_AGI_API_KEY=...            # only for hosted endpoints
 ```
 
-Invalid numeric configuration fails fast. `EARLY_AGI_CHI_MAX`, `EARLY_AGI_TAU`,
-`EARLY_AGI_ETA_HIGH`, `EARLY_AGI_ETA_MIN`, `EARLY_AGI_SINK`, `EARLY_AGI_MERA`,
-and `EARLY_AGI_MAX_FILES` are wired into `Settings.build_runtime()` and the demo.
+Invalid numeric configuration fails fast. `EARLY_AGI_BACKEND`,
+`EARLY_AGI_CHI_MAX`, `EARLY_AGI_TAU`, `EARLY_AGI_ETA_HIGH`,
+`EARLY_AGI_ETA_MIN`, `EARLY_AGI_SINK`, `EARLY_AGI_MERA`, and
+`EARLY_AGI_MAX_FILES` are wired into `Settings.build_runtime()` and the demo.
 
 ```python
 from early_agi.config import Settings

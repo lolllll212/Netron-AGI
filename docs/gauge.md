@@ -138,6 +138,21 @@ be passed directly to `GaugeVM`/`run_gauge`. `adapter="require"` raises
 `ThrmlUnavailableError` unless THRML is installed in that environment; the
 default sampler remains pure Python/NumPy.
 
+The selector is wired through the entrypoints:
+
+```bash
+export EARLY_AGI_BACKEND=bounded_chi       # Settings.from_env / .env
+python -m early_agi.demo --backend bounded_chi --no-dotenv
+python -m early_agi.gauge run examples/netron_solve.gauge --backend thrml --root .
+python -m pip install -e ".[thrml]"        # optional JAX/THRML environment
+```
+
+`Settings.backend` defaults to `classical_svd`, is validated against
+`available_backends()`, and is used by `Settings.build_runtime()` and `GaugeVM`.
+`GaugeRunResult.as_dict()` reports both the requested `backend` selector and the
+concrete `backend_impl` name. The optional `[thrml]` extra does not add a hard
+runtime dependency; bundled aliases continue to use the pure-Python adapter seam.
+
 ## CLI
 
 ```bash
@@ -145,12 +160,14 @@ python -m early_agi.gauge parse examples/netron_solve.gauge
 python -m early_agi.gauge check examples/netron_solve.gauge
 python -m early_agi.gauge compile examples/netron_solve.gauge --output ir.json
 python -m early_agi.gauge run examples/netron_solve.gauge --root . --output run.json
+python -m early_agi.gauge run examples/netron_solve.gauge --root . --backend bounded_chi --output bounded-run.json
 ```
 
 After installation, the same commands are available as `gauge` and
 `early-agi-gauge`. Use `--compact` for one-line JSON, `--no-dotenv` to ignore a
-local `.env`, and `--root` to choose the workspace that gates scan. `parse`,
-`check`, and `compile` are offline and side-effect free. `run` writes only to the
+local `.env`, `--backend` to select the relaxation backend for `run`, and
+`--root` to choose the workspace that gates scan. `parse`, `check`, and
+`compile` are offline and side-effect free. `run` writes only to the
 configured cold sink (in-memory by default) and reports synthesis replay,
 recall, and fused-reflex results.
 
