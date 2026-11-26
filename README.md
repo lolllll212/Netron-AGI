@@ -1,5 +1,9 @@
 # early-agi
 
+[![ci](https://github.com/lolll212/Netron-AGI/actions/workflows/ci.yml/badge.svg)](https://github.com/lolll212/Netron-AGI/actions/workflows/ci.yml)
+[![python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/)
+[![changelog](https://img.shields.io/badge/changelog-keep%20a%20changelog-informational)](CHANGELOG.md)
+
 A binary-orchestrated, physics-backend hybrid cognitive kernel. The agent loop is
 deterministic Python + SQLite; the "physics" lives behind a swappable
 `RelaxationBackend` interface, so numpy SVD can be replaced by tensor networks,
@@ -48,6 +52,16 @@ early_agi/
 └── session.py              # per-turn loop over a real repository
 ```
 
+## Install
+
+Requires Python ≥ 3.10. Nothing here needs a GPU, a model, or a network.
+
+```bash
+python -m pip install -e .             # runtime: numpy only
+python -m pip install -e ".[dev]"      # + pytest and ruff
+python -m pip install -e ".[verify]"   # + z3-solver for the SMT gate
+```
+
 ## Run it
 
 ```bash
@@ -59,6 +73,18 @@ The demo prints the three physical regimes, the coupling matrix of this package,
 the commutator table with a write lock being enforced, MERA consolidation, a full
 edit → verify → `eta_cog` → directive loop against a throwaway repo, and reflex
 compilation replaying a learned fix with zero router calls.
+
+## Development
+
+```bash
+ruff check .            # lint (policy lives in pyproject.toml)
+ruff format --check .   # formatting
+python -m pytest -q     # 59 focused tests
+python -m early_agi.demo  # six sections, offline, no API key
+```
+
+CI runs the same checks on Linux and Windows, on the oldest and newest supported
+Python, and builds the sdist/wheel to prove the package metadata is valid.
 
 ### Live models
 
@@ -141,5 +167,5 @@ cheaper but never less verified.
 - The deep reasoner's artefacts are structurally validated and archived but not
   yet replayed against the cold sink before registration — that is Phase 4.
 - Reflexes replay recorded full-file contents, so they are exact-patch memories:
-they fire only on a pre-state they have literally seen and do not generalise to a
-new path or a renamed symbol.
+  they fire only on a pre-state they have literally seen and do not generalise to
+  a new path or a renamed symbol.

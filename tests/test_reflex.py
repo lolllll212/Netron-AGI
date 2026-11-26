@@ -31,9 +31,7 @@ def multiplies(root: Path, bits: float = 4.0) -> DarkStateGate:
 def learn_once(sink: ColdSink, root: Path) -> None:
     fixture(root)
     kernel = EarlyAGIKernel(sink, gates=[multiplies(root)], chi_max=2)
-    router = ScriptedRouter(
-        [TurnProposal(edits=(Edit("calc.py", FIXED),), rationale="multiply, do not add")]
-    )
+    router = ScriptedRouter([TurnProposal(edits=(Edit("calc.py", FIXED),), rationale="multiply, do not add")])
     outcome = AgentSession(root, kernel, router).turn("make mul(2, 3) return 6")
     assert outcome.directive == "CRYSTALLIZE"
     assert outcome.applied == ("calc.py",)

@@ -60,7 +60,7 @@ class Settings:
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         return cls(
             base_url=_str("EARLY_AGI_BASE_URL", DEFAULT_BASE_URL),
             api_key=_str("EARLY_AGI_API_KEY", ""),

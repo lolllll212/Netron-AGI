@@ -14,12 +14,13 @@ invariants.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Deque, Mapping, Protocol, Sequence
+from typing import Any, Protocol
 
 from ..core.cold_sink import canonical_json
 from ..core.kernel import ShiftArtifact
-from .client import LLMReply, OpenAICompatibleClient
+from .client import OpenAICompatibleClient
 
 __all__ = [
     "DualTierRouter",
@@ -59,7 +60,7 @@ class RouterError(RuntimeError):
 
 
 class Router(Protocol):
-    def execute(self, brief: Mapping[str, Any]) -> "TurnProposal": ...
+    def execute(self, brief: Mapping[str, Any]) -> TurnProposal: ...
 
     def reason(self, brief: Mapping[str, Any]) -> ShiftArtifact: ...
 
@@ -161,7 +162,7 @@ class DualTierRouter:
         self.deep = deep
 
     @classmethod
-    def from_settings(cls, settings: Any = None) -> "DualTierRouter":
+    def from_settings(cls, settings: Any = None) -> DualTierRouter:
         from ..config import Settings
 
         settings = settings or Settings.from_env()
@@ -196,8 +197,8 @@ class ScriptedRouter:
         *,
         strict: bool = False,
     ) -> None:
-        self._executions: Deque[Any] = deque(executions)
-        self._shifts: Deque[Any] = deque(shifts)
+        self._executions: deque[Any] = deque(executions)
+        self._shifts: deque[Any] = deque(shifts)
         self.strict = strict
         self.calls: list[str] = []
 
@@ -215,6 +216,8 @@ class ScriptedRouter:
         if not self._shifts:
             if self.strict:
                 raise RouterError("no scripted shift left")
-            return ShiftArtifact(kind="invariant", payload={"check": "True"}, rationale="scripted: no-op reframe")
+            return ShiftArtifact(
+                kind="invariant", payload={"check": "True"}, rationale="scripted: no-op reframe"
+            )
         item = self._shifts.popleft()
         return item if isinstance(item, ShiftArtifact) else parse_shift(item)

@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import ast
 from collections import Counter, defaultdict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -99,12 +100,23 @@ class RepoGraph:
         constraints: Sequence[Constraint] = (),
         *,
         gates: Mapping[str, Sequence[str]] | None = None,
-    ) -> "CouplingMatrix":
+    ) -> CouplingMatrix:
         columns = list(constraints)
         for name, paths in (gates or {}).items():
-            columns.append(Constraint(id=f"gate:{name}", kind="constraint", paths=tuple(paths), description="dark-state verifier scope"))
+            columns.append(
+                Constraint(
+                    id=f"gate:{name}",
+                    kind="constraint",
+                    paths=tuple(paths),
+                    description="dark-state verifier scope",
+                )
+            )
         if not columns:
-            columns.append(Constraint(id="constraint:all", kind="constraint", paths=(".",), description="whole repository"))
+            columns.append(
+                Constraint(
+                    id="constraint:all", kind="constraint", paths=(".",), description="whole repository"
+                )
+            )
         return build_coupling(self, columns)
 
 
@@ -224,7 +236,7 @@ class RepoScanner:
             for function in info.functions:
                 simple_index[function.split("::", 1)[1].split(".")[-1]].append(function)
 
-        for module_id, info in modules.items():
+        for info in modules.values():
             for caller, callees in info.calls.items():
                 for simple in callees:
                     for target in simple_index.get(simple, ()):
@@ -322,9 +334,11 @@ class RepoScanner:
                 return dotted[probe]
         return None
 
-    def _select_entities(self, modules: Mapping[str, ModuleInfo], edges: Mapping[str, Counter[str]]) -> tuple[str, ...]:
+    def _select_entities(
+        self, modules: Mapping[str, ModuleInfo], edges: Mapping[str, Counter[str]]
+    ) -> tuple[str, ...]:
         scored: list[tuple[int, str]] = [(0, module_id) for module_id in modules]
-        for module_id, info in modules.items():
+        for info in modules.values():
             for function in info.functions:
                 inbound = sum(1 for src in edges.values() if function in src)
                 scored.append((inbound, function))

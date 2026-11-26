@@ -3,7 +3,7 @@
 ``eta_cog`` is verified entropy collapse per unit of irreversibly spent
 resource::
 
-    eta_cog = verified_entropy_drop_bits / (w_tok*tokens + w_tool*tools + w_branch*branches)
+    eta_cog = verified_entropy_drop_bits / (w_tok * tokens + w_tool * tools + w_branch * branches)
 
 The governor turns that single scalar (plus the entanglement regime) into one of
 three binary directives. The ordering is a priority ladder, not a vote:
@@ -85,7 +85,7 @@ class ThermodynamicGovernor:
         self,
         verified_entropy_drop: float,
         cost: CognitiveStepCost,
-        entanglement: "EntanglementReport",
+        entanglement: EntanglementReport,
     ) -> tuple[float, Directive]:
         w_sink = cost.weighted(w_tok=self.w_tok, w_tool=self.w_tool, w_branch=self.w_branch)
         eta_cog = float(verified_entropy_drop) / (w_sink + 1e-6)

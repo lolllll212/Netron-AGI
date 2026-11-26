@@ -33,9 +33,9 @@ def test_append_only_is_enforced_by_the_database() -> None:
     with ColdSink() as sink:
         sink.put("uv_state", {"x": 1})
         with pytest.raises(sqlite3.IntegrityError):
-            sink._conn.execute("UPDATE states SET kind = 'tampered'")  # noqa: SLF001
+            sink._conn.execute("UPDATE states SET kind = 'tampered'")
         with pytest.raises(sqlite3.IntegrityError):
-            sink._conn.execute("DELETE FROM states")  # noqa: SLF001
+            sink._conn.execute("DELETE FROM states")
         assert sink.count() == 1
 
 

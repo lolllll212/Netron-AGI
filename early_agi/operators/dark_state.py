@@ -21,9 +21,10 @@ import importlib.util
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 
 __all__ = [
     "DarkStateGate",
@@ -37,6 +38,7 @@ __all__ = [
     "verifier_availability",
     "z3_gate",
 ]
+
 
 @dataclass(frozen=True)
 class GateResult:
@@ -53,7 +55,7 @@ class GateResult:
         return {"name": self.name, "verdict": self.verdict, "bits": self.bits, "detail": self.detail}
 
 
-Check = Callable[[Mapping[str, Any]], bool | None | GateResult]
+Check = Callable[[Mapping[str, Any]], bool | GateResult | None]
 
 
 def _fail(detail: str) -> GateResult:
@@ -180,7 +182,7 @@ def ruff_gate(name: str = "lint_ok", bits: float = 1.5, timeout: float = 30.0) -
         targets = [p for p in _targets(state) if p.is_file() and not _ignored(p, root)]
         if not targets:
             return None
-        completed = subprocess.run(  # noqa: S603
+        completed = subprocess.run(
             [*command, "check", "--quiet", "--output-format=concise", *[str(p) for p in targets]],
             cwd=str(root),
             capture_output=True,
@@ -208,7 +210,7 @@ def run_pytest(
     """Run pytest in ``root``; ``passed`` is None when the outcome is unknown."""
     command = [sys.executable, "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider", *paths]
     try:
-        completed = subprocess.run(  # noqa: S603
+        completed = subprocess.run(
             command,
             cwd=str(root),
             capture_output=True,
@@ -216,7 +218,12 @@ def run_pytest(
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return {"returncode": None, "passed": None, "stdout": "", "stderr": f"pytest timed out after {timeout}s"}
+        return {
+            "returncode": None,
+            "passed": None,
+            "stdout": "",
+            "stderr": f"pytest timed out after {timeout}s",
+        }
     if completed.returncode == 0:
         passed: bool | None = True
     elif completed.returncode == 1:

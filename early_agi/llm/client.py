@@ -8,12 +8,12 @@ code change, which is the "zero cloud lock-in" requirement.
 from __future__ import annotations
 
 import json
-import socket
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from ..config import DEFAULT_BASE_URL, Settings
 
@@ -123,7 +123,7 @@ class OpenAICompatibleClient:
         self.temperature = float(temperature)
 
     @classmethod
-    def from_settings(cls, tier: str = "fast", settings: Settings | None = None) -> "OpenAICompatibleClient":
+    def from_settings(cls, tier: str = "fast", settings: Settings | None = None) -> OpenAICompatibleClient:
         settings = settings or Settings.from_env()
         model = settings.fast_model if tier == "fast" else settings.deep_model
         return cls(
@@ -180,7 +180,7 @@ class OpenAICompatibleClient:
                 last_error = LLMError(f"{self.endpoint} returned HTTP {exc.code}: {detail}")
                 if exc.code < 500 and exc.code != 429:
                     raise last_error from exc
-            except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError) as exc:
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
                 last_error = LLMUnavailable(f"cannot reach {self.endpoint}: {exc}")
             except json.JSONDecodeError as exc:
                 last_error = LLMError(f"non-JSON response from {self.endpoint}: {exc}")

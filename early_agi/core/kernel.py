@@ -16,8 +16,9 @@ Two invariants are enforced here rather than asked for in a prompt:
 from __future__ import annotations
 
 import ast
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -30,8 +31,8 @@ from .entropy_sensor import matrix_fingerprint
 from .governor import CognitiveStepCost, Directive, ThermodynamicGovernor
 
 __all__ = [
-    "EarlyAGIKernel",
     "SHIFT_KINDS",
+    "EarlyAGIKernel",
     "ShiftArtifact",
     "TickResult",
     "validate_shift_artifact",
@@ -52,11 +53,15 @@ class ShiftArtifact:
     rationale: str = ""
 
     @classmethod
-    def from_mapping(cls, data: Mapping[str, Any]) -> "ShiftArtifact":
+    def from_mapping(cls, data: Mapping[str, Any]) -> ShiftArtifact:
         payload = data.get("payload")
         if not isinstance(payload, Mapping):
             payload = {key: value for key, value in data.items() if key not in ("kind", "rationale")}
-        return cls(kind=str(data.get("kind", "")).strip(), payload=dict(payload), rationale=str(data.get("rationale", ""))[:2000])
+        return cls(
+            kind=str(data.get("kind", "")).strip(),
+            payload=dict(payload),
+            rationale=str(data.get("rationale", ""))[:2000],
+        )
 
     def validate(self) -> tuple[bool, str]:
         return validate_shift_artifact(self.kind, self.payload)
@@ -343,14 +348,12 @@ class EarlyAGIKernel:
         for gate in self.gates:
             result = gate.evaluate(candidate_state)
             results[gate.name] = result
-            if result.passed is True:
-                if gate.name not in self.satisfied_gates:
-                    newly_verified += gate.bits
-                    self.satisfied_gates.add(gate.name)
-            elif result.passed is False:
-                if gate.name in self.satisfied_gates:
-                    broken += gate.bits
-                    self.satisfied_gates.discard(gate.name)
+            if result.passed is True and gate.name not in self.satisfied_gates:
+                newly_verified += gate.bits
+                self.satisfied_gates.add(gate.name)
+            elif result.passed is False and gate.name in self.satisfied_gates:
+                broken += gate.bits
+                self.satisfied_gates.discard(gate.name)
             # None: unverifiable, so neither awarded nor charged
         return results, newly_verified - broken
 

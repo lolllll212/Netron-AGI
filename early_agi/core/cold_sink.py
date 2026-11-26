@@ -18,9 +18,10 @@ import sqlite3
 import threading
 import time
 import zlib
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any
 
 __all__ = ["ColdSink", "SinkError", "SinkRecord", "canonical_json"]
 
@@ -83,7 +84,7 @@ def canonical_json(payload: Mapping[str, Any] | Any) -> str:
 
 
 def _digest(scale: int, kind: str, raw: str) -> str:
-    return hashlib.sha256(f"{scale}\x1f{kind}\x1f{raw}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"{scale}\x1f{kind}\x1f{raw}".encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -224,7 +225,9 @@ class ColdSink:
         if min_eta is not None:
             sql += " AND eta_cog IS NOT NULL AND eta_cog >= ?"
             params.append(min_eta)
-        sql += " ORDER BY created_at ASC, hash ASC" if oldest_first else " ORDER BY created_at DESC, hash DESC"
+        sql += (
+            " ORDER BY created_at ASC, hash ASC" if oldest_first else " ORDER BY created_at DESC, hash DESC"
+        )
         if limit is not None:
             sql += " LIMIT ?"
             params.append(max(1, limit))
@@ -270,7 +273,9 @@ class ColdSink:
             kinds = self._conn.execute(
                 "SELECT kind, COUNT(*), MIN(scale), MAX(scale) FROM states GROUP BY kind ORDER BY kind"
             ).fetchall()
-            total = self._conn.execute("SELECT COUNT(*), COALESCE(SUM(LENGTH(payload)), 0) FROM states").fetchone()
+            total = self._conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(LENGTH(payload)), 0) FROM states"
+            ).fetchone()
         return {
             "db_path": self.db_path,
             "records": int(total[0]),
@@ -285,7 +290,7 @@ class ColdSink:
         with self._lock:
             self._conn.close()
 
-    def __enter__(self) -> "ColdSink":
+    def __enter__(self) -> ColdSink:
         return self
 
     def __exit__(self, *exc_info: object) -> None:

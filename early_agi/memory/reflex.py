@@ -24,9 +24,10 @@ a lineage back to the traces that justified it.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from ..core.cold_sink import SinkRecord, canonical_json
 from .mera_graph import MeraGraph
@@ -71,7 +72,7 @@ class ReflexEdit:
         return {"path": self.path, "content": self.content, "before_sha": list(self.before_sha)}
 
     @classmethod
-    def from_payload(cls, data: Mapping[str, Any]) -> "ReflexEdit":
+    def from_payload(cls, data: Mapping[str, Any]) -> ReflexEdit:
         path, content = data.get("path"), data.get("content")
         if not isinstance(path, str) or not path or not isinstance(content, str):
             raise ValueError("reflex edit needs a 'path' and 'content'")
@@ -216,7 +217,9 @@ def compile_reflexes(
         passed_sets = [_passing(traces[parent].payload) for parent in parents]
         expected = sorted(set.intersection(*passed_sets)) if passed_sets else []
         if not expected:
-            skipped.append(f"{signature[:8]}: the winning edits were never gated, so there is no effect to replay")
+            skipped.append(
+                f"{signature[:8]}: the winning edits were never gated, so there is no effect to replay"
+            )
             continue
         pattern = sorted(set.intersection(*(_features(traces[parent].payload) for parent in parents)))
 

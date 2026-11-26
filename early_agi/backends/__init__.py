@@ -10,7 +10,7 @@ from __future__ import annotations
 from .base import RelaxationBackend
 from .classical_svd import ClassicalSVDBackend
 
-__all__ = ["RelaxationBackend", "ClassicalSVDBackend", "available_backends", "get_backend"]
+__all__ = ["ClassicalSVDBackend", "RelaxationBackend", "available_backends", "get_backend"]
 
 _FACTORIES = {
     "classical_svd": ClassicalSVDBackend,

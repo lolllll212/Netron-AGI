@@ -11,7 +11,9 @@ AREA_LAW = np.outer([1.0, 0.8, 0.2, 0.1], [1.0, 0.5, 0.2, 0.1])
 VOLUME_LAW = np.random.default_rng(42).standard_normal((8, 8))
 
 
-def make_kernel(sink: ColdSink, *, gates: list[DarkStateGate] | None = None, lock: bool = True) -> EarlyAGIKernel:
+def make_kernel(
+    sink: ColdSink, *, gates: list[DarkStateGate] | None = None, lock: bool = True
+) -> EarlyAGIKernel:
     gates = gates or [
         DarkStateGate("syntax_ok", lambda state: bool(state.get("syntax_ok")), 2.0),
         DarkStateGate("tests_pass", lambda state: bool(state.get("tests_pass")), 4.0),
@@ -102,7 +104,9 @@ def test_breaking_a_verified_gate_charges_its_bits_back() -> None:
     with ColdSink() as sink:
         kernel = make_kernel(sink)
         kernel.tick({"syntax_ok": True, "tests_pass": False}, AREA_LAW, CognitiveStepCost(tool_cost=1.0))
-        result = kernel.tick({"syntax_ok": False, "tests_pass": False}, AREA_LAW, CognitiveStepCost(tool_cost=1.0))
+        result = kernel.tick(
+            {"syntax_ok": False, "tests_pass": False}, AREA_LAW, CognitiveStepCost(tool_cost=1.0)
+        )
 
         assert result.verified_drop_bits == -2.0
         assert kernel.satisfied_gates == set()

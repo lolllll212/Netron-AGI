@@ -36,9 +36,7 @@ def build_tangled(root: Path) -> None:
         others = [other for other in names if other != name]
         imports = "\n".join(f"from {other} import work_{other}" for other in others)
         calls = " + ".join(
-            f"work_{other}(n - {repetition})"
-            for other in others
-            for repetition in range(1, position + 1)
+            f"work_{other}(n - {repetition})" for other in others for repetition in range(1, position + 1)
         )
         (root / f"{name}.py").write_text(
             f"{imports}\n\n\ndef work_{name}(n):\n    return (n or 0) + ({calls})\n",

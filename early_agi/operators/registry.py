@@ -23,19 +23,20 @@ import shlex
 import subprocess
 import time
 import tokenize
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any
 
 __all__ = [
+    "READ",
+    "VERIFY",
+    "WILDCARD",
+    "WRITE",
+    "CommutatorViolation",
     "OperatorEvent",
     "OperatorRegistry",
     "OperatorSpec",
-    "READ",
-    "VERIFY",
-    "WRITE",
-    "WILDCARD",
-    "CommutatorViolation",
     "WriteLocked",
     "build_default_registry",
 ]
@@ -193,9 +194,7 @@ class OperatorRegistry:
 
         if spec.mutates and self.writes_locked:
             self._record(spec, targets, ok=False, blocked=True, detail=self._lock_reason)
-            raise WriteLocked(
-                f"operator {name!r} is mutating but writes are isolated: {self._lock_reason}"
-            )
+            raise WriteLocked(f"operator {name!r} is mutating but writes are isolated: {self._lock_reason}")
 
         started = time.perf_counter()
         try:
@@ -276,14 +275,13 @@ class OperatorRegistry:
     def commutes(self, first: str, second: str, /, **kwargs: Any) -> bool:
         return self.commutator(first, second, **kwargs) == 0.0
 
-    def matrix(self, names: Sequence[str] | None = None, *, path: str = "<path>") -> dict[str, dict[str, float]]:
+    def matrix(
+        self, names: Sequence[str] | None = None, *, path: str = "<path>"
+    ) -> dict[str, dict[str, float]]:
         """Symmetric commutator side-effect matrix for the given operators."""
         chosen = tuple(names) if names else self.names()
         args = {"path": path, "command": path, "target": path}
-        return {
-            a: {b: self.commutator(a, b, **args) for b in chosen}
-            for a in chosen
-        }
+        return {a: {b: self.commutator(a, b, **args) for b in chosen} for a in chosen}
 
     def as_table(self, names: Sequence[str] | None = None, *, path: str = "<path>") -> str:
         matrix = self.matrix(names, path=path)
@@ -425,7 +423,7 @@ def build_default_registry(root: str | Path) -> OperatorRegistry:
         return {"path": path, "renames": count}
 
     def run_shell(command: str, *, timeout: float = 60.0) -> dict[str, Any]:
-        completed = subprocess.run(  # noqa: S603 - explicit, shlex-split, no shell
+        completed = subprocess.run(
             shlex.split(command),
             cwd=str(base),
             capture_output=True,

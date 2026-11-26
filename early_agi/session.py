@@ -12,11 +12,11 @@ Per turn:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
-from .core.cold_sink import ColdSink
 from .core.coupling import Constraint, CouplingMatrix, RepoGraph, RepoScanner
 from .core.governor import CognitiveStepCost, Directive
 from .core.kernel import EarlyAGIKernel, TickResult
@@ -155,9 +155,7 @@ class AgentSession:
                 reverted = applied
                 status = "reflex_reverted"
             if self.reflexes is not None:
-                self.reflexes.record(
-                    reflex, ok=satisfied, eta_cog=tick.eta_cog, parent_hash=tick.hash
-                )
+                self.reflexes.record(reflex, ok=satisfied, eta_cog=tick.eta_cog, parent_hash=tick.hash)
         elif tick.directive == Directive.RECALL_SINK.value and self.revert_on_recall and applied:
             self._restore(snapshots)
             reverted = applied

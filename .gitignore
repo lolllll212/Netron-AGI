@@ -9,3 +9,9 @@ venv/
 .env
 .env.*
 !.env.example
+
+# packaging / verification artifacts
+build/
+dist/
+*.egg-info/
+.build_check/

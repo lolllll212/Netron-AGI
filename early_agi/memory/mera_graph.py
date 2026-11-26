@@ -18,9 +18,10 @@ import json
 import sqlite3
 import time
 from collections import Counter
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -126,7 +127,16 @@ class MeraGraph:
         self._conn.execute(
             "INSERT OR IGNORE INTO nodes (hash, scale, kind, payload, parent_hash, eta_cog, weight, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (digest, scale, kind, json.dumps(dict(payload), sort_keys=True, default=str), parent_hash, eta_cog, weight, time.time()),
+            (
+                digest,
+                scale,
+                kind,
+                json.dumps(dict(payload), sort_keys=True, default=str),
+                parent_hash,
+                eta_cog,
+                weight,
+                time.time(),
+            ),
         )
         return digest
 
@@ -149,7 +159,9 @@ class MeraGraph:
     ) -> CoarseGrainReport:
         records = self.sink.records(kinds=kinds, scale=scale, min_eta=min_eta, limit=limit)
         if len(records) < 2:
-            return CoarseGrainReport(scale=scale, records=len(records), features=0, clusters=0, skipped="need >= 2 traces")
+            return CoarseGrainReport(
+                scale=scale, records=len(records), features=0, clusters=0, skipped="need >= 2 traces"
+            )
 
         vocabulary = sorted({feature for record in records for feature in _features(record)})
         if len(vocabulary) < 2:
@@ -255,7 +267,9 @@ class MeraGraph:
 
     def rules(self, *, scale: int | None = None, min_support: int = 1) -> list[dict[str, Any]]:
         return [
-            node for node in self.nodes(scale=scale, kind="rule") if int(node["payload"].get("support", 0)) >= min_support
+            node
+            for node in self.nodes(scale=scale, kind="rule")
+            if int(node["payload"].get("support", 0)) >= min_support
         ]
 
     def members(self, rule_hash: str) -> list[str]:

@@ -146,7 +146,14 @@ def mera(sink: ColdSink) -> None:
     report = graph.coarse_grain(scale=0, chi_max=4)
     show("coarse-grain report", report.as_dict())
     for rule in graph.rules(scale=1):
-        show("  rule", {"scale": rule["scale"], "support": rule["payload"]["support"], "pattern": rule["payload"]["pattern"]})
+        show(
+            "  rule",
+            {
+                "scale": rule["scale"],
+                "support": rule["payload"]["support"],
+                "pattern": rule["payload"]["pattern"],
+            },
+        )
     show("levels", graph.levels())
 
 
@@ -182,8 +189,10 @@ def session_loop() -> None:
                 {"kind": "invariant", "payload": {"check": "mul(2, 3) == 6"}, "rationale": "pin the contract"}
             ],
         )
-        session = AgentSession(root, kernel, router, constraints=[Constraint(id="gate:tests_pass", paths=(".",))])
-        for turn in range(3):
+        session = AgentSession(
+            root, kernel, router, constraints=[Constraint(id="gate:tests_pass", paths=(".",))]
+        )
+        for _ in range(3):
             outcome = session.turn("make mul(2, 3) return 6")
             show(f"turn {outcome.turn} ({outcome.status}) ->", outcome.as_dict())
         show("verifier availability", verifier_availability())
@@ -203,14 +212,20 @@ def reflex_compilation() -> None:
         for index in range(2):
             root = base / f"learn{index}"
             _fixture(root)
-            kernel = EarlyAGIKernel(sink=sink, gates=[DarkStateGate("multiplies", _multiplies(root), 4.0)], chi_max=2)
+            kernel = EarlyAGIKernel(
+                sink=sink, gates=[DarkStateGate("multiplies", _multiplies(root), 4.0)], chi_max=2
+            )
             router = ScriptedRouter(
                 [TurnProposal(edits=(Edit("calc.py", fix),), rationale="multiply, do not add")]
             )
             outcome = AgentSession(root, kernel, router).turn("make mul(2, 3) return 6")
             show(
                 f"  learning turn {index + 1}",
-                {"directive": outcome.directive, "verified_bits": outcome.verified_drop_bits, "applied": list(outcome.applied)},
+                {
+                    "directive": outcome.directive,
+                    "verified_bits": outcome.verified_drop_bits,
+                    "applied": list(outcome.applied),
+                },
             )
 
         library = ReflexLibrary(MeraGraph(sink, ":memory:"))
@@ -220,12 +235,19 @@ def reflex_compilation() -> None:
 
         root = base / "replay"
         _fixture(root)
-        kernel = EarlyAGIKernel(sink=sink, gates=[DarkStateGate("multiplies", _multiplies(root), 4.0)], chi_max=2)
+        kernel = EarlyAGIKernel(
+            sink=sink, gates=[DarkStateGate("multiplies", _multiplies(root), 4.0)], chi_max=2
+        )
         router = ScriptedRouter(strict=True)  # no script left: only a reflex can act
         outcome = AgentSession(root, kernel, router, reflexes=library).turn("make mul(2, 3) return 6")
         show(
             "  reflex turn",
-            {"status": outcome.status, "directive": outcome.directive, "reflex": outcome.reflex, "applied": list(outcome.applied)},
+            {
+                "status": outcome.status,
+                "directive": outcome.directive,
+                "reflex": outcome.reflex,
+                "applied": list(outcome.applied),
+            },
         )
         show("  router calls (must be empty)", {"calls": router.calls})
 
