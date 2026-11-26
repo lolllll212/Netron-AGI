@@ -6,6 +6,30 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Gauge**, a custom cognitive and thermodynamic orchestration language: span-tagged lexer/AST/parser, static algebra and reversibility checker, safe tri-state expression evaluator, compact bytecode IR/compiler, hybrid VM, CLI (`python -m early_agi.gauge`), docs, and `examples/netron_solve.gauge`.
+- Gauge Step-4 operator synthesis with a deterministic offline default, optional router hook, restricted execution, and mandatory positive efficiency improvement before registration.
+- `Settings.build_runtime()`, strict environment validation, `.env` loading, explicit `EARLY_AGI_LLM_ENABLED` opt-in, and complete wiring of physics/storage/scan settings into the demo.
+- Real Z3 SMT-LIB2 solving with `unsat`/`sat`/`unknown` mapped to true tri-state verifier results.
+- `docs/gauge.md`, `CONTRIBUTING.md`, `SECURITY.md`, and an MIT `LICENSE`.
+- Regression tests for Gauge parsing/checking/compiling/running, transactional rollback, allowlists, task-aware reflexes, config, JSON extraction, backend use, cold-sink metadata, wildcard commutator audits, semantic shift artifacts, and deep-tier cost accounting.
+
+### Fixed
+
+- Enforced the brief file allowlist in both live-router parsing and the session write path.
+- Made edit batches transactional: partial write failures restore workspace bytes, kernel checkpoints, gate state, and registry bookkeeping.
+- Reconciled gate state after recall/revert so a rolled-back branch cannot award the same verified bits twice.
+- Enforced the coordinate-shift write lock at the actual `write_file` registry boundary; `run_shell` is now disabled by default.
+- Preserved tri-state verifier outcomes and fixed wildcard write-race auditing without `KeyError`.
+- Made reflex matching task-aware while retaining exact pre-state hashes and expected gates.
+- Added semantic verification of shift artifacts (false invariants, unsafe sources, and mutating operators are rejected) and charged deep-tier tokens/latency to `eta_cog`.
+- Fixed noisy JSON array extraction and provider usage totals.
+- Cold-sink identity now retains all metadata commits, persists compression format, and losslessly encodes bytes in canonical JSON.
+- `MeraGraph.coarse_grain()` now uses the backend `truncate()`/`left_basis()` contract instead of a hard-coded SVD call.
+- Improved coupling scanner resolution for qualified imports/calls and explicit scan truncation reporting.
+- Handled non-UTF-8 source files without crashing brief construction; aligned CI and dev-tooling versions.
+
 ## [0.3.0] — 2026-11-26
 
 Reflex compilation: memory that makes the loop cheaper without making it less

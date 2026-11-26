@@ -15,6 +15,7 @@ from typing import Any
 import numpy as np
 
 from .backends import available_backends, get_backend
+from .config import Settings
 from .core.cold_sink import ColdSink
 from .core.coupling import Constraint, RepoScanner
 from .core.governor import CognitiveStepCost, ThermodynamicGovernor
@@ -35,20 +36,21 @@ def show(label: str, payload: Any) -> None:
     print(f"{label:<42} {json.dumps(payload, sort_keys=True)}")
 
 
-def regimes() -> ColdSink:
+def regimes(settings: Settings | None = None) -> ColdSink:
     """Pillars 1-3 over the three physical regimes."""
+    settings = settings or Settings.from_env()
     section("1. Kernel regimes (lossless sink + SVD sensor + eta_cog governor)")
-    sink = ColdSink(":memory:")
+    sink = ColdSink(settings.sink_path)
     kernel = EarlyAGIKernel(
         sink=sink,
         backend=get_backend("classical_svd"),
-        governor=ThermodynamicGovernor(),
+        governor=ThermodynamicGovernor(eta_high=settings.eta_high, eta_min=settings.eta_min),
         gates=[
             DarkStateGate("syntax_ok", lambda state: bool(state.get("syntax_ok")), 2.0),
             DarkStateGate("tests_pass", lambda state: bool(state.get("tests_pass")), 4.0),
         ],
-        chi_max=2,
-        tau=0.15,
+        chi_max=settings.chi_max,
+        tau=settings.tau,
     )
     area_law = np.outer([1.0, 0.8, 0.2, 0.1], [1.0, 0.5, 0.2, 0.1])
     rng = np.random.default_rng(42)
@@ -97,10 +99,11 @@ def regimes() -> ColdSink:
     return sink
 
 
-def repo_coupling() -> None:
+def repo_coupling(settings: Settings | None = None) -> None:
+    settings = settings or Settings.from_env()
     section("2. Coupling matrix from the import/call graph (this package)")
     root = Path(__file__).resolve().parent
-    scanner = RepoScanner(root, max_files=80)
+    scanner = RepoScanner(root, max_files=settings.max_files)
     graph = scanner.scan()
     constraints = [
         Constraint(id="gate:syntax_ok", paths=(".",)),
@@ -140,9 +143,10 @@ def commutators() -> None:
             print("  audit:", violation.describe())
 
 
-def mera(sink: ColdSink) -> None:
+def mera(sink: ColdSink, settings: Settings | None = None) -> None:
+    settings = settings or Settings.from_env()
     section("4. MERA consolidation: L0 traces -> L1 rules")
-    graph = MeraGraph(sink, ":memory:")
+    graph = MeraGraph(sink, settings.mera_path, backend=get_backend("classical_svd"))
     report = graph.coarse_grain(scale=0, chi_max=4)
     show("coarse-grain report", report.as_dict())
     for rule in graph.rules(scale=1):
@@ -166,16 +170,19 @@ def _fixture(root: Path) -> None:
     )
 
 
-def session_loop() -> None:
+def session_loop(settings: Settings | None = None) -> None:
+    settings = settings or Settings.from_env()
     section("5. Phase-1 loop: edit -> verify -> eta_cog -> directive")
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         _fixture(root)
-        sink = ColdSink(":memory:")
+        sink = ColdSink(settings.sink_path)
         kernel = EarlyAGIKernel(
             sink=sink,
+            governor=ThermodynamicGovernor(eta_high=settings.eta_high, eta_min=settings.eta_min),
             gates=[ast_syntax_gate(bits=2.0), pytest_gate(bits=4.0, timeout=120.0)],
-            chi_max=2,
+            chi_max=settings.chi_max,
+            tau=settings.tau,
         )
         router = ScriptedRouter(
             executions=[
@@ -189,8 +196,13 @@ def session_loop() -> None:
                 {"kind": "invariant", "payload": {"check": "mul(2, 3) == 6"}, "rationale": "pin the contract"}
             ],
         )
+        scanner = RepoScanner(root, max_files=settings.max_files)
         session = AgentSession(
-            root, kernel, router, constraints=[Constraint(id="gate:tests_pass", paths=(".",))]
+            root,
+            kernel,
+            router,
+            scanner=scanner,
+            constraints=[Constraint(id="gate:tests_pass", paths=(".",))],
         )
         for _ in range(3):
             outcome = session.turn("make mul(2, 3) return 6")
@@ -203,12 +215,13 @@ def _multiplies(root: Path):
     return lambda state: "*" in (root / "calc.py").read_text(encoding="utf-8")
 
 
-def reflex_compilation() -> None:
+def reflex_compilation(settings: Settings | None = None) -> None:
+    settings = settings or Settings.from_env()
     section("6. Phase-3 reflex compilation: a repeated win becomes a zero-LLM procedure")
     fix = "def mul(a, b):\n    return a * b\n"
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
-        sink = ColdSink(":memory:")
+        sink = ColdSink(settings.sink_path)
         for index in range(2):
             root = base / f"learn{index}"
             _fixture(root)
@@ -228,7 +241,7 @@ def reflex_compilation() -> None:
                 },
             )
 
-        library = ReflexLibrary(MeraGraph(sink, ":memory:"))
+        library = ReflexLibrary(MeraGraph(sink, settings.mera_path, backend=get_backend("classical_svd")))
         show("compile report", library.compile(min_support=2).as_dict())
         for reflex in library.reflexes():
             show("  reflex", reflex.as_dict())
@@ -253,14 +266,19 @@ def reflex_compilation() -> None:
 
 
 def main() -> int:
+    settings = Settings.from_env()
     print("early-agi demo | numpy + sqlite3 only | no network required")
-    sink = regimes()
-    repo_coupling()
+    show("effective settings", settings.to_dict())
+    sink = regimes(settings)
+    repo_coupling(settings)
     commutators()
-    mera(sink)
-    session_loop()
-    reflex_compilation()
-    print("\nDone. Set EARLY_AGI_BASE_URL/EARLY_AGI_FAST_MODEL/EARLY_AGI_DEEP_MODEL for the live loop.")
+    mera(sink, settings)
+    session_loop(settings)
+    reflex_compilation(settings)
+    print(
+        "\nDone. Gauge scripts: python -m early_agi.gauge check examples/netron_solve.gauge. "
+        "Set EARLY_AGI_LLM_ENABLED=1 plus the endpoint/model variables for live routing."
+    )
     return 0
 
 

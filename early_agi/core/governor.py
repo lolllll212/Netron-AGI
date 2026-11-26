@@ -1,23 +1,4 @@
-"""The eta_cog thermodynamic governor.
-
-``eta_cog`` is verified entropy collapse per unit of irreversibly spent
-resource::
-
-    eta_cog = verified_entropy_drop_bits / (w_tok * tokens + w_tool * tools + w_branch * branches)
-
-The governor turns that single scalar (plus the entanglement regime) into one of
-three binary directives. The ordering is a priority ladder, not a vote:
-
-1. RECALL_SINK — two consecutive non-positive drops: the branch is dead, replay
-   the pruned tail from the cold sink instead of burning more budget.
-2. SHIFT_COORDINATE — volume-law coupling, or positive-but-dragging eta: local
-   effort is buying nothing, so reframe the problem / invent a coordinate.
-3. CRYSTALLIZE — cheap, area-law, high-yield descent: commit and move on.
-
-Note the comparison in (2) is ``eta < eta_high``. The alternative written as
-``eta <= eta_high`` inverted the ladder in the original sketch: it sent both
-high-eta and low-eta ticks to SHIFT_COORDINATE and made CRYSTALLIZE unreachable.
-"""
+"""The eta_cog thermodynamic governor with a real rolling stall window."""
 
 from __future__ import annotations
 
@@ -25,25 +6,24 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-if TYPE_CHECKING:  # pragma: no cover - typing only
+if TYPE_CHECKING:
     from .entropy_sensor import EntanglementReport
 
 __all__ = ["CognitiveStepCost", "Directive", "ThermodynamicGovernor"]
 
 
 class Directive(str, Enum):
-    CRYSTALLIZE = "CRYSTALLIZE"  # high eta_cog: fast executor converges to a fixed point
-    SHIFT_COORDINATE = "SHIFT_COORDINATE"  # volume law or drag: halt search, reframe / invent
-    RECALL_SINK = "RECALL_SINK"  # stalled/negative eta_cog: recover pruned branch and revise
+    CRYSTALLIZE = "CRYSTALLIZE"
+    SHIFT_COORDINATE = "SHIFT_COORDINATE"
+    RECALL_SINK = "RECALL_SINK"
 
 
 @dataclass
 class CognitiveStepCost:
-    """Irreversible resources burned by a single tick."""
-
     discarded_tokens: int = 0
     tool_cost: float = 0.0
     pruned_branches: int = 0
+    latency_ms: float = 0.0
 
     def weighted(
         self,
@@ -51,11 +31,13 @@ class CognitiveStepCost:
         w_tok: float = 0.001,
         w_tool: float = 1.0,
         w_branch: float = 2.0,
+        w_latency: float = 0.0001,
     ) -> float:
         return (
             w_tok * max(0, self.discarded_tokens)
             + w_tool * max(0.0, self.tool_cost)
             + w_branch * max(0, self.pruned_branches)
+            + w_latency * max(0.0, self.latency_ms)
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -63,22 +45,25 @@ class CognitiveStepCost:
             "discarded_tokens": self.discarded_tokens,
             "tool_cost": self.tool_cost,
             "pruned_branches": self.pruned_branches,
+            "latency_ms": round(self.latency_ms, 3),
         }
 
 
 @dataclass
 class ThermodynamicGovernor:
-    eta_high: float = 1.2  # crystallise at or above this efficiency
-    eta_min: float = 0.15  # stall floor for the rolling mean
+    eta_high: float = 1.2
+    eta_min: float = 0.15
     w_tok: float = 0.001
     w_tool: float = 1.0
     w_branch: float = 2.0
-    window: int = 3  # rolling window for the stall test
-    stall_ticks: int = 2  # consecutive non-positive drops that trigger recall
+    w_latency: float = 0.0001
+    window: int = 3
+    stall_ticks: int = 2
+    max_history: int = 256
     history: list[float] = field(default_factory=list)
     drops: list[float] = field(default_factory=list)
     directives: list[Directive] = field(default_factory=list)
-    shift_streak: int = 0  # consecutive SHIFT_COORDINATE; >=2 is the Pillar-4 trigger
+    shift_streak: int = 0
     recall_streak: int = 0
 
     def evaluate(
@@ -87,22 +72,24 @@ class ThermodynamicGovernor:
         cost: CognitiveStepCost,
         entanglement: EntanglementReport,
     ) -> tuple[float, Directive]:
-        w_sink = cost.weighted(w_tok=self.w_tok, w_tool=self.w_tool, w_branch=self.w_branch)
+        w_sink = cost.weighted(
+            w_tok=self.w_tok,
+            w_tool=self.w_tool,
+            w_branch=self.w_branch,
+            w_latency=self.w_latency,
+        )
         eta_cog = float(verified_entropy_drop) / (w_sink + 1e-6)
 
         self.history.append(eta_cog)
         self.drops.append(float(verified_entropy_drop))
-
         if verified_entropy_drop <= 0.0:
             self.recall_streak += 1
         else:
             self.recall_streak = 0
 
-        # Two ways to conclude the branch is dead: a *regression* that already
-        # dropped below the efficiency floor (severe, act immediately), or the
-        # configured number of consecutive non-positive ticks. Merely having a
-        # small rolling eta must not bypass stall_ticks, or the counter is moot.
-        regressed_past_floor = verified_entropy_drop < 0.0 and eta_cog <= self.eta_min
+        rolling = self.rolling_eta
+        dragging = rolling is not None and rolling <= self.eta_min
+        regressed_past_floor = verified_entropy_drop < 0.0 and (eta_cog <= self.eta_min or dragging)
         stalled = (
             verified_entropy_drop <= 0.0 and self.recall_streak >= self.stall_ticks
         ) or regressed_past_floor
@@ -110,7 +97,7 @@ class ThermodynamicGovernor:
         if stalled:
             directive = Directive.RECALL_SINK
             self.shift_streak = 0
-        elif entanglement.is_volume_law or eta_cog < self.eta_high:
+        elif entanglement.is_volume_law or eta_cog < self.eta_high or dragging:
             directive = Directive.SHIFT_COORDINATE
             self.shift_streak += 1
         else:
@@ -118,9 +105,17 @@ class ThermodynamicGovernor:
             self.shift_streak = 0
 
         self.directives.append(directive)
+        self._trim_history()
         return eta_cog, directive
 
-    # -- introspection ------------------------------------------------------
+    def _trim_history(self) -> None:
+        if self.max_history <= 0 or len(self.history) <= self.max_history:
+            return
+        keep = self.max_history
+        self.history = self.history[-keep:]
+        self.drops = self.drops[-keep:]
+        self.directives = self.directives[-keep:]
+
     @property
     def last_eta(self) -> float | None:
         return self.history[-1] if self.history else None
@@ -131,14 +126,26 @@ class ThermodynamicGovernor:
         return sum(tail) / len(tail) if tail else None
 
     @property
+    def drag(self) -> bool:
+        rolling = self.rolling_eta
+        return rolling is not None and rolling <= self.eta_min
+
+    @property
     def synthesis_due(self) -> bool:
-        """Pillar 4 trigger: two consecutive coordinate shifts."""
         return self.shift_streak >= 2
+
+    def consume_synthesis(self) -> None:
+        """Phase-4 hook: acknowledge that synthesis has been attempted."""
+        self.shift_streak = 0
 
     def snapshot(self) -> dict[str, Any]:
         return {
             "eta": self.last_eta,
             "rolling_eta": self.rolling_eta,
+            "eta_min": self.eta_min,
+            "eta_high": self.eta_high,
+            "window": self.window,
+            "drag": self.drag,
             "ticks": len(self.history),
             "shift_streak": self.shift_streak,
             "recall_streak": self.recall_streak,

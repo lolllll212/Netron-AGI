@@ -1,0 +1,124 @@
+"""Runtime objects shared by the Gauge VM and expression evaluator."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+from . import ast as g
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateView:
+    files: tuple[str, ...]
+    targets: tuple[str, ...]
+    has_regressions: bool = False
+
+
+@dataclass(slots=True)
+class GaugeState:
+    root: Path
+    files: list[str] = field(default_factory=list)
+    targets: list[str] = field(default_factory=list)
+    sources: dict[str, str] = field(default_factory=dict)
+    has_regressions: bool = False
+    task: str = ""
+    scale: int = 0
+
+    @property
+    def ast(self) -> SimpleNamespace:
+        return SimpleNamespace(modules=tuple(self.files))
+
+    @property
+    def repo(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            root=str(self.root),
+            ast=self.ast,
+            modules=tuple(self.files),
+        )
+
+    @property
+    def candidate(self) -> CandidateView:
+        return CandidateView(tuple(self.files), tuple(self.targets), self.has_regressions)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "repo_root": str(self.root),
+            "paths": list(self.files),
+            "sources": dict(self.sources),
+            "task": self.task,
+            "scale": self.scale,
+            "repo": self.repo,
+            "p": self.candidate,
+            "scope": list(self.files),
+            "max_tokens": 0,
+            "entanglement_bound": 0.0,
+            "has_regressions": self.has_regressions,
+        }
+
+
+@dataclass(slots=True)
+class ManifoldState:
+    name: str
+    space: str
+    constraints: list[Any]
+    scale: int = 0
+    basis: str = "identity"
+    collapsed: bool = False
+    data: dict[str, Any] = field(default_factory=dict)
+
+    def snapshot(self) -> dict[str, Any]:
+        return {"basis": self.basis, "data": dict(self.data), "collapsed": self.collapsed}
+
+    def restore(self, snapshot: dict[str, Any]) -> None:
+        self.basis = str(snapshot.get("basis", "identity"))
+        self.data = dict(snapshot.get("data", {}))
+        self.collapsed = bool(snapshot.get("collapsed", False))
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "space": self.space,
+            "scale": self.scale,
+            "basis": self.basis,
+            "collapsed": self.collapsed,
+            "data": dict(self.data),
+        }
+
+
+@dataclass(slots=True)
+class ReversibleTransform:
+    decl: g.TransformDecl
+    vm: Any
+
+    def apply(
+        self,
+        manifold: ManifoldState,
+        args: list[Any],
+        kwargs: dict[str, Any],
+    ) -> ManifoldState:
+        previous = manifold.snapshot()
+        self.vm.inverse_stack.append((self.decl.name, manifold.name, previous))
+        context = self.vm.transform_context(self.decl, manifold, args, kwargs)
+        for stmt in self.decl.body:
+            self.vm.execute_transform_statement(stmt, context)
+        return manifold
+
+    def uncall(self, manifold: ManifoldState | None = None) -> ManifoldState | None:
+        for index in range(len(self.vm.inverse_stack) - 1, -1, -1):
+            name, manifold_name, snapshot = self.vm.inverse_stack[index]
+            if name != self.decl.name:
+                continue
+            if manifold is not None and manifold.name != manifold_name:
+                continue
+            target = manifold or self.vm.manifolds.get(manifold_name)
+            if target is not None:
+                target.restore(snapshot)
+            del self.vm.inverse_stack[index]
+            return target
+        return manifold
+
+
+__all__ = ["CandidateView", "GaugeState", "ManifoldState", "ReversibleTransform"]

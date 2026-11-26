@@ -1,17 +1,8 @@
-"""Lossless, content-addressed cold sink (Maxwell's demon with exact undo).
-
-Every state the kernel touches — including every branch it prunes — is committed
-here *before* it can influence anything else. Nothing is ever overwritten: the
-store is append-only, enforced by SQLite triggers, so "deleting" a branch is
-physically impossible and RECALL_SINK is always an exact restore.
-
-Records are keyed by ``sha256(scale \\x1f kind \\x1f canonical_json)``, which makes
-the store idempotent (the same state at the same scale is stored once) and
-verifiable (reads re-hash the payload and refuse to return corrupt rows).
-"""
+"""Lossless, content-addressed cold sink with metadata-aware identity."""
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import sqlite3
@@ -39,6 +30,20 @@ CREATE INDEX IF NOT EXISTS idx_kind_scale ON states(kind, scale);
 CREATE INDEX IF NOT EXISTS idx_parent ON states(parent_hash);
 CREATE INDEX IF NOT EXISTS idx_created ON states(created_at);
 
+CREATE TABLE IF NOT EXISTS sink_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS state_commits (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    hash        TEXT NOT NULL,
+    parent_hash TEXT,
+    eta_cog     REAL,
+    created_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_commits_hash ON state_commits(hash, id);
+
 CREATE TRIGGER IF NOT EXISTS states_no_update
 BEFORE UPDATE ON states
 BEGIN
@@ -58,32 +63,43 @@ class SinkError(RuntimeError):
 
 
 def _json_default(value: Any) -> Any:
-    """Best-effort lossless encoding for common non-JSON payload values."""
-    if hasattr(value, "tolist"):  # numpy arrays/scalars, torch tensors
+    """Best-effort deterministic encoding for common non-JSON payload values."""
+    if hasattr(value, "tolist"):
         return value.tolist()
     if isinstance(value, (set, frozenset)):
         return sorted(value, key=repr)
     if isinstance(value, bytes):
-        return value.decode("utf-8", "backslashreplace")
+        return {"__bytes__": base64.b64encode(value).decode("ascii")}
     if isinstance(value, Path):
         return str(value)
-    if hasattr(value, "value") and hasattr(value, "name"):  # enum
+    if hasattr(value, "value") and hasattr(value, "name"):
         return value.value
-    return repr(value)
+    return {"__repr__": repr(value)}
+
+
+def _json_object_hook(obj: dict[str, Any]) -> Any:
+    if set(obj) == {"__bytes__"}:
+        try:
+            return base64.b64decode(str(obj["__bytes__"]))
+        except Exception:
+            return obj
+    return obj
 
 
 def canonical_json(payload: Mapping[str, Any] | Any) -> str:
-    """Deterministic JSON used both for hashing and for storage."""
+    """Deterministic strict JSON used both for hashing and for storage."""
     return json.dumps(
         payload,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
+        allow_nan=False,
         default=_json_default,
     )
 
 
 def _digest(scale: int, kind: str, raw: str) -> str:
+    """Hash immutable content only; parent/eta are mutable provenance metadata."""
     return hashlib.sha256(f"{scale}\x1f{kind}\x1f{raw}".encode()).hexdigest()
 
 
@@ -131,10 +147,41 @@ class ColdSink:
                     self._conn.execute("PRAGMA journal_mode=WAL;")
                 self._conn.execute("PRAGMA synchronous=FULL;")
                 self._conn.executescript(_SCHEMA)
-        except sqlite3.DatabaseError as exc:  # pragma: no cover - environmental
+                self._ensure_meta()
+        except SinkError:
+            self._conn.close()
+            raise
+        except sqlite3.DatabaseError as exc:  # pragma: no cover
             raise SinkError(f"cannot open cold sink at {self.db_path!r}: {exc}") from exc
 
-    # -- write path ---------------------------------------------------------
+    def _ensure_meta(self) -> None:
+        requested = "zlib" if self._compress else "raw"
+        row = self._conn.execute("SELECT value FROM sink_meta WHERE key = 'compression'").fetchone()
+        if row is None:
+            inferred = requested
+            sample = self._conn.execute("SELECT payload FROM states LIMIT 1").fetchone()
+            if sample is not None:
+                try:
+                    zlib.decompress(bytes(sample[0]))
+                    inferred = "zlib"
+                except zlib.error:
+                    inferred = "raw"
+            if inferred != requested:
+                raise SinkError(
+                    f"cold sink at {self.db_path!r} uses {inferred} payloads, "
+                    f"but compress={self._compress!r} was requested"
+                )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO sink_meta (key, value) VALUES ('compression', ?)",
+                (inferred,),
+            )
+            self._conn.execute("INSERT OR REPLACE INTO sink_meta (key, value) VALUES ('format_version', '2')")
+        elif str(row[0]) != requested:
+            raise SinkError(
+                f"cold sink at {self.db_path!r} uses {row[0]!r} payloads, "
+                f"but compress={self._compress!r} was requested"
+            )
+
     def put(
         self,
         kind: str,
@@ -143,13 +190,16 @@ class ColdSink:
         parent_hash: str | None = None,
         eta_cog: float | None = None,
     ) -> str:
-        """Commit a state and return its content hash (idempotent)."""
+        """Commit a state and return its content hash (idempotent for identical metadata)."""
         if not kind:
             raise SinkError("kind is required")
         if not isinstance(scale, int) or scale < 0:
             raise SinkError(f"scale must be a non-negative int, got {scale!r}")
-        raw = canonical_json(payload)
-        digest = _digest(scale, kind, raw)
+        try:
+            raw = canonical_json(payload)
+            digest = _digest(scale, kind, raw)
+        except (TypeError, ValueError) as exc:
+            raise SinkError(f"cannot canonicalise {kind!r} payload: {exc}") from exc
         blob = zlib.compress(raw.encode("utf-8"), 6) if self._compress else raw.encode("utf-8")
         with self._lock:
             try:
@@ -161,11 +211,16 @@ class ColdSink:
                     """,
                     (digest, parent_hash, scale, kind, blob, eta_cog, time.time()),
                 )
+                # Every commit is retained, even when content dedupes.
+                # states keeps the original immutable-first metadata.
+                self._conn.execute(
+                    "INSERT INTO state_commits (hash, parent_hash, eta_cog, created_at) VALUES (?, ?, ?, ?)",
+                    (digest, parent_hash, eta_cog, time.time()),
+                )
             except sqlite3.DatabaseError as exc:
                 raise SinkError(f"cannot commit {kind!r}: {exc}") from exc
         return digest
 
-    # -- read path ----------------------------------------------------------
     def get(self, digest: str, *, verify: bool = True) -> SinkRecord | None:
         with self._lock:
             row = self._conn.execute(
@@ -190,16 +245,23 @@ class ColdSink:
         min_eta: float | None = None,
         scale: int | None = None,
     ) -> list[SinkRecord]:
-        """Most recent records of a kind, newest first."""
-        sql = "SELECT hash, parent_hash, scale, kind, payload, eta_cog, created_at FROM states WHERE kind = ?"
+        sql = """
+            SELECT s.hash, c.parent_hash, s.scale, s.kind, s.payload, c.eta_cog, s.created_at
+            FROM states s
+            JOIN (
+                SELECT hash, MIN(id) AS id FROM state_commits GROUP BY hash
+            ) first ON first.hash = s.hash
+            JOIN state_commits c ON c.id = first.id
+            WHERE s.kind = ?
+        """
         params: list[Any] = [kind]
         if min_eta is not None:
-            sql += " AND eta_cog IS NOT NULL AND eta_cog >= ?"
+            sql += " AND c.eta_cog >= ?"
             params.append(min_eta)
         if scale is not None:
-            sql += " AND scale = ?"
+            sql += " AND s.scale = ?"
             params.append(scale)
-        sql += " ORDER BY created_at DESC, hash DESC LIMIT ?"
+        sql += " ORDER BY c.created_at DESC, s.hash DESC LIMIT ?"
         params.append(max(1, limit))
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
@@ -236,7 +298,6 @@ class ColdSink:
         return [self._decode(row) for row in rows]
 
     def lineage(self, digest: str, *, limit: int = 256) -> list[SinkRecord]:
-        """Walk ``parent_hash`` back to the root; returned oldest-first."""
         chain: list[SinkRecord] = []
         seen: set[str] = set()
         cursor: str | None = digest
@@ -250,6 +311,25 @@ class ColdSink:
         chain.reverse()
         return chain
 
+    def commits(self, digest: str) -> list[dict[str, Any]]:
+        """Return all append-only provenance commits for a content hash."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, hash, parent_hash, eta_cog, created_at FROM state_commits "
+                "WHERE hash = ? ORDER BY id ASC",
+                (digest,),
+            ).fetchall()
+        return [
+            {
+                "id": int(row[0]),
+                "hash": str(row[1]),
+                "parent_hash": str(row[2]) if row[2] else None,
+                "eta_cog": float(row[3]) if row[3] is not None else None,
+                "created_at": float(row[4]),
+            }
+            for row in rows
+        ]
+
     def children(self, digest: str) -> list[SinkRecord]:
         with self._lock:
             rows = self._conn.execute(
@@ -259,7 +339,6 @@ class ColdSink:
             ).fetchall()
         return [self._decode(row) for row in rows]
 
-    # -- introspection ------------------------------------------------------
     def count(self, kind: str | None = None) -> int:
         with self._lock:
             if kind is None:
@@ -280,6 +359,7 @@ class ColdSink:
             "db_path": self.db_path,
             "records": int(total[0]),
             "bytes": int(total[1]),
+            "compression": "zlib" if self._compress else "raw",
             "kinds": {
                 str(kind): {"count": int(n), "min_scale": int(lo), "max_scale": int(hi)}
                 for kind, n, lo, hi in kinds
@@ -296,12 +376,11 @@ class ColdSink:
     def __exit__(self, *exc_info: object) -> None:
         self.close()
 
-    # -- internals ----------------------------------------------------------
     def _decode(self, row: Iterable[Any]) -> SinkRecord:
         digest, parent, scale, kind, blob, eta, created = row
         try:
             raw = zlib.decompress(bytes(blob)) if self._compress else bytes(blob)
-            payload = json.loads(raw.decode("utf-8"))
+            payload = json.loads(raw.decode("utf-8"), object_hook=_json_object_hook)
         except (zlib.error, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise SinkError(f"record {str(digest)[:10]} is unreadable: {exc}") from exc
         return SinkRecord(

@@ -1,10 +1,4 @@
-"""The backend seam.
-
-Anything that can answer "how entangled is this coupling matrix, and what does
-it cost to truncate at chi_max?" satisfies this protocol. Keeping it this small
-is deliberate: it is the contract that lets numpy SVD be replaced by tensor
-networks or a p-bit sampler without an agent-loop rewrite.
-"""
+"""The backend seam."""
 
 from __future__ import annotations
 
@@ -32,4 +26,8 @@ class RelaxationBackend(Protocol):
 
     def truncate(self, coupling_matrix: Any, chi_max: int = 4) -> Any:
         """Best rank-chi_max approximation of the coupling matrix."""
+        ...
+
+    def left_basis(self, coupling_matrix: Any, k: int = 4) -> Any:
+        """First k left singular vectors, for deterministic IR clustering."""
         ...

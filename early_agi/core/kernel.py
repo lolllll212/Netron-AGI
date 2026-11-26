@@ -3,19 +3,12 @@
 A tick is deterministic and reproducible: export pruned branches, measure
 entanglement, run the dark-state gates, ask the governor for a directive,
 archive the state. Nothing in here calls a model; the router feeds it.
-
-Two invariants are enforced here rather than asked for in a prompt:
-
-1. Verified entropy only. A gate awards its bits the first time it passes and
-   charges them back if a later edit breaks it. Unverifiable gates are neutral.
-2. Coordinate shifts physically block edits. When SHIFT_COORDINATE fires, writes
-   are isolated until a valid reframing artefact (decomposition / invariant /
-   new operator) arrives. Sending another patch holds the lock instead.
 """
 
 from __future__ import annotations
 
 import ast
+import copy
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -27,7 +20,7 @@ from ..backends.classical_svd import ClassicalSVDBackend
 from ..operators.dark_state import DarkStateGate, GateResult
 from ..operators.registry import OperatorRegistry
 from .cold_sink import ColdSink
-from .entropy_sensor import matrix_fingerprint
+from .entropy_sensor import EntanglementReport, matrix_fingerprint
 from .governor import CognitiveStepCost, Directive, ThermodynamicGovernor
 
 __all__ = [
@@ -41,9 +34,6 @@ __all__ = [
 SHIFT_KINDS = ("decomposition", "invariant", "new_operator")
 
 
-# ---------------------------------------------------------------------------
-# Coordinate-shift artefacts
-# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ShiftArtifact:
     """A reframing product from the deep tier. Not a patch, by construction."""
@@ -51,54 +41,193 @@ class ShiftArtifact:
     kind: str
     payload: Mapping[str, Any] = field(default_factory=dict)
     rationale: str = ""
+    tokens: int = 0
+    latency_ms: float = 0.0
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> ShiftArtifact:
         payload = data.get("payload")
         if not isinstance(payload, Mapping):
-            payload = {key: value for key, value in data.items() if key not in ("kind", "rationale")}
+            payload = {
+                key: value
+                for key, value in data.items()
+                if key not in ("kind", "rationale", "tokens", "latency_ms")
+            }
         return cls(
             kind=str(data.get("kind", "")).strip(),
             payload=dict(payload),
             rationale=str(data.get("rationale", ""))[:2000],
+            tokens=int(data.get("tokens", 0) or 0),
+            latency_ms=float(data.get("latency_ms", 0.0) or 0.0),
         )
 
-    def validate(self) -> tuple[bool, str]:
-        return validate_shift_artifact(self.kind, self.payload)
+    def validate(
+        self,
+        *,
+        state: Mapping[str, Any] | None = None,
+        entanglement: EntanglementReport | None = None,
+    ) -> tuple[bool, str]:
+        return validate_shift_artifact(self.kind, self.payload, state=state, entanglement=entanglement)
 
     def as_dict(self) -> dict[str, Any]:
-        return {"kind": self.kind, "payload": dict(self.payload), "rationale": self.rationale}
+        return {
+            "kind": self.kind,
+            "payload": dict(self.payload),
+            "rationale": self.rationale,
+            "tokens": self.tokens,
+            "latency_ms": round(self.latency_ms, 3),
+        }
 
 
-def validate_shift_artifact(kind: str, payload: Mapping[str, Any]) -> tuple[bool, str]:
-    """Structural check; keeps model output inside the loop's contract."""
-    if kind not in SHIFT_KINDS:
-        return False, f"kind must be one of {', '.join(SHIFT_KINDS)}; got {kind!r}"
+def _safe_member(obj: Any, attr: str) -> Any:
+    if attr.startswith("__"):
+        raise ValueError("dunder access is not allowed in an invariant")
+    if isinstance(obj, Mapping) and attr in obj:
+        return obj[attr]
+    if isinstance(obj, object) and hasattr(obj, attr):
+        return getattr(obj, attr)
+    raise ValueError(f"unknown member {attr!r}")
 
-    if kind == "decomposition":
-        steps = payload.get("steps")
-        if not isinstance(steps, (list, tuple)) or len(steps) < 2:
-            return False, "decomposition needs at least two 'steps'"
-        if not all(isinstance(step, str) and step.strip() for step in steps):
-            return False, "every decomposition step must be a non-empty string"
-        return True, ""
 
-    if kind == "invariant":
-        check = payload.get("check") or payload.get("assertion")
-        if not isinstance(check, str) or not check.strip():
-            return False, "invariant needs a non-empty 'check' expression"
-        try:
-            compile(check, "<invariant>", "eval")
-        except SyntaxError as exc:
-            return False, f"invariant does not compile: {exc.msg}"
-        return True, ""
+def _safe_eval(node: ast.AST, names: Mapping[str, Any]) -> Any:
+    """Evaluate a deliberately tiny expression grammar without Python eval()."""
+    if isinstance(node, ast.Expression):
+        return _safe_eval(node.body, names)
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        return names.get(node.id, None)
+    if isinstance(node, ast.Attribute):
+        return _safe_member(_safe_eval(node.value, names), node.attr)
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return [_safe_eval(item, names) for item in node.elts]
+    if isinstance(node, ast.Dict):
+        return {
+            _safe_eval(key, names): _safe_eval(value, names)
+            for key, value in zip(node.keys, node.values, strict=True)
+        }
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.Not, ast.USub, ast.UAdd)):
+        operand = _safe_eval(node.operand, names)
+        if operand is None:
+            return None
+        if isinstance(node.op, ast.Not):
+            return not bool(operand)
+        return -operand if isinstance(node.op, ast.USub) else +operand
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod)):
+        left, right = _safe_eval(node.left, names), _safe_eval(node.right, names)
+        if left is None or right is None:
+            return None
+        if isinstance(node.op, ast.Add):
+            return left + right
+        if isinstance(node.op, ast.Sub):
+            return left - right
+        if isinstance(node.op, ast.Mult):
+            return left * right
+        if isinstance(node.op, ast.Div):
+            return left / right
+        return left % right
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, (ast.And, ast.Or)):
+        values = [_safe_eval(value, names) for value in node.values]
+        if isinstance(node.op, ast.And):
+            return False if False in values else None if None in values else all(values)
+        return True if True in values else None if None in values else any(values)
+    if isinstance(node, ast.Call):
+        target = node.func
+        if not isinstance(target, ast.Name) or target.id not in _SAFE_CALLABLES:
+            raise ValueError("only pure helper calls are allowed")
+        args = [_safe_eval(arg, names) for arg in node.args]
+        if node.keywords:
+            raise ValueError("keyword calls are not allowed")
+        if any(arg is None for arg in args):
+            return None
+        return _SAFE_CALLABLES[target.id](*args)
+    if isinstance(node, ast.Compare):
+        left = _safe_eval(node.left, names)
+        for op, comparator in zip(node.ops, node.comparators, strict=True):
+            right = _safe_eval(comparator, names)
+            if left is None or right is None:
+                return None
+            if isinstance(op, ast.Eq):
+                value = left == right
+            elif isinstance(op, ast.NotEq):
+                value = left != right
+            elif isinstance(op, ast.Lt):
+                value = left < right
+            elif isinstance(op, ast.LtE):
+                value = left <= right
+            elif isinstance(op, ast.Gt):
+                value = left > right
+            elif isinstance(op, ast.GtE):
+                value = left >= right
+            elif isinstance(op, ast.In):
+                value = left in right
+            elif isinstance(op, ast.NotIn):
+                value = left not in right
+            else:  # pragma: no cover - future AST comparison operators
+                raise ValueError(f"unsupported comparison {type(op).__name__}")
+            if not value:
+                return False
+            left = right
+        return True
+    raise ValueError(f"unsafe expression node {type(node).__name__}")
 
-    name = payload.get("name")
-    source = payload.get("source")
-    if not isinstance(name, str) or not name.isidentifier():
-        return False, "new_operator needs an identifier 'name'"
-    if not isinstance(source, str) or not source.strip():
-        return False, "new_operator needs 'source'"
+
+_SAFE_CALLABLES: dict[str, Any] = {
+    "len": len,
+    "abs": abs,
+    "min": min,
+    "max": max,
+    "sum": sum,
+    "all": all,
+    "any": any,
+    "sorted": sorted,
+    "bool": bool,
+    "int": int,
+    "float": float,
+    "str": str,
+    "list": list,
+    "tuple": tuple,
+    "dict": dict,
+    "mul": lambda left, right: left * right,
+}
+
+
+def _validate_invariant(check: str, state: Mapping[str, Any] | None) -> tuple[bool, str]:
+    try:
+        tree = ast.parse(check, mode="eval")
+    except SyntaxError as exc:
+        return False, f"invariant does not compile: {exc.msg}"
+    if any(
+        isinstance(node, (ast.Import, ast.ImportFrom, ast.Lambda, ast.Subscript)) for node in ast.walk(tree)
+    ):
+        return False, "invariant uses unsafe syntax"
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        if not isinstance(target, ast.Name) or target.id not in _SAFE_CALLABLES:
+            return False, "invariant may only call pure builtin helpers"
+        if node.keywords:
+            return False, "invariant helper calls cannot use keyword arguments"
+    names: dict[str, Any] = {
+        "True": True,
+        "False": False,
+        "None": None,
+        **dict(state or {}),
+        "state": dict(state or {}),
+    }
+    try:
+        verdict = _safe_eval(tree, names)
+    except (ValueError, TypeError, AttributeError, ZeroDivisionError) as exc:
+        return False, f"invariant is not safely evaluable: {exc}"
+    if verdict is False:
+        return False, "invariant is false for this candidate state"
+    if verdict is None:
+        return True, "invariant references unavailable values; structural check only"
+    return bool(verdict), ""
+
+
+def _validate_new_operator(name: str, source: str, state: Mapping[str, Any] | None) -> tuple[bool, str]:
     try:
         tree = ast.parse(source)
     except SyntaxError as exc:
@@ -117,12 +246,89 @@ def validate_shift_artifact(kind: str, payload: Mapping[str, Any]) -> tuple[bool
     }
     if name not in defined | assigned:
         return False, f"source does not define {name!r}"
+
+    forbidden = (ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal, ast.Lambda, ast.Await, ast.Yield)
+    for node in ast.walk(tree):
+        if isinstance(node, forbidden):
+            return False, f"new_operator source contains forbidden {type(node).__name__}"
+        if isinstance(node, ast.Name) and (
+            node.id.startswith("__") or node.id in {"eval", "exec", "compile", "open"}
+        ):
+            return False, f"new_operator source references unsafe name {node.id!r}"
+        if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
+            return False, "new_operator source cannot access interpreter internals"
+        if isinstance(node, ast.Call):
+            target = node.func
+            if not isinstance(target, ast.Name) or target.id not in {
+                *_SAFE_CALLABLES,
+                "print",
+            }:
+                return False, "new_operator source may only call pure helpers"
+    if state is None:
+        return True, ""
+
+    namespace: dict[str, Any] = {"__builtins__": {**_SAFE_CALLABLES, "range": range}}
+    try:
+        exec(compile(tree, "<new_operator>", "exec"), namespace, namespace)
+    except Exception as exc:
+        return False, f"new_operator source failed in its restricted namespace: {type(exc).__name__}: {exc}"
+    fn = namespace.get(name)
+    if not callable(fn):
+        return False, f"{name!r} is not callable after validation"
+    payload = copy.deepcopy(dict(state))
+    before = copy.deepcopy(payload)
+    try:
+        fn(payload)
+    except TypeError:
+        try:
+            fn()
+        except Exception as exc:
+            return False, f"new_operator is not executable: {type(exc).__name__}: {exc}"
+    except Exception as exc:
+        return False, f"new_operator is not executable: {type(exc).__name__}: {exc}"
+    if payload != before:
+        return False, "new_operator mutated its candidate state"
     return True, ""
 
 
-# ---------------------------------------------------------------------------
-# Tick result
-# ---------------------------------------------------------------------------
+def validate_shift_artifact(
+    kind: str,
+    payload: Mapping[str, Any],
+    *,
+    state: Mapping[str, Any] | None = None,
+    entanglement: EntanglementReport | None = None,
+) -> tuple[bool, str]:
+    """Validate structure and, when a state is available, semantic effect."""
+    if kind not in SHIFT_KINDS:
+        return False, f"kind must be one of {', '.join(SHIFT_KINDS)}; got {kind!r}"
+
+    if kind == "decomposition":
+        steps = payload.get("steps")
+        if not isinstance(steps, (list, tuple)) or len(steps) < 2:
+            return False, "decomposition needs at least two 'steps'"
+        if not all(isinstance(step, str) and step.strip() for step in steps):
+            return False, "every decomposition step must be a non-empty string"
+        if len({step.strip().casefold() for step in steps}) != len(steps):
+            return False, "decomposition steps must be distinct"
+        if entanglement is not None and entanglement.is_volume_law and len(steps) < 2:
+            return False, "volume-law coupling needs a genuine split"
+        return True, ""
+
+    if kind == "invariant":
+        check = payload.get("check") or payload.get("assertion")
+        if not isinstance(check, str) or not check.strip():
+            return False, "invariant needs a non-empty 'check' expression"
+        return _validate_invariant(check, state)
+
+    name = payload.get("name")
+    source = payload.get("source")
+    if not isinstance(name, str) or not name.isidentifier():
+        return False, "new_operator needs an identifier 'name'"
+    if not isinstance(source, str) or not source.strip():
+        return False, "new_operator needs 'source'"
+    return _validate_new_operator(name, source, state)
+
+
 @dataclass(frozen=True)
 class TickResult:
     hash: str
@@ -161,9 +367,6 @@ class TickResult:
         }
 
 
-# ---------------------------------------------------------------------------
-# Kernel
-# ---------------------------------------------------------------------------
 class EarlyAGIKernel:
     def __init__(
         self,
@@ -197,7 +400,6 @@ class EarlyAGIKernel:
         self._lock_reason = ""
         self._last_eta: float | None = None
 
-    # -- state --------------------------------------------------------------
     @property
     def writes_locked(self) -> bool:
         return self._writes_locked
@@ -222,7 +424,71 @@ class EarlyAGIKernel:
         if self.registry is not None:
             self.registry.release_writes()
 
-    # -- the tick -----------------------------------------------------------
+    def evaluate_gates(self, candidate_state: Mapping[str, Any]) -> tuple[dict[str, GateResult], float]:
+        """Run gates once without mutating kernel state; the tick commits them."""
+        return self._gate_delta(candidate_state, commit=False)
+
+    def apply_gate_results(self, results: Mapping[str, GateResult]) -> None:
+        """Commit a gate transition after the workspace transaction survives."""
+        for result in results.values():
+            if result.passed is True:
+                self.satisfied_gates.add(result.name)
+            elif result.passed is False:
+                self.satisfied_gates.discard(result.name)
+
+    def reconcile_gates(self, candidate_state: Mapping[str, Any]) -> dict[str, GateResult]:
+        """Re-align gate bookkeeping with a restored workspace without paying bits."""
+        results: dict[str, GateResult] = {}
+        for gate in self.gates:
+            result = gate.evaluate(candidate_state)
+            results[gate.name] = result
+            if result.passed is True:
+                self.satisfied_gates.add(gate.name)
+            elif result.passed is False:
+                self.satisfied_gates.discard(gate.name)
+        return results
+
+    def checkpoint(self) -> dict[str, Any]:
+        """Capture mutable kernel/governor state for a failed-turn rollback."""
+        return {
+            "last_hash": self.last_hash,
+            "satisfied_gates": set(self.satisfied_gates),
+            "history": list(self.history),
+            "coordinate_shifts": self.coordinate_shifts,
+            "pruned_branches": self.pruned_branches,
+            "writes_locked": self._writes_locked,
+            "lock_reason": self._lock_reason,
+            "last_eta": self._last_eta,
+            "governor": {
+                "history": list(self.governor.history),
+                "drops": list(self.governor.drops),
+                "directives": list(self.governor.directives),
+                "shift_streak": self.governor.shift_streak,
+                "recall_streak": self.governor.recall_streak,
+            },
+        }
+
+    def restore_checkpoint(self, checkpoint: Mapping[str, Any]) -> None:
+        self.last_hash = checkpoint.get("last_hash")
+        self.satisfied_gates = set(checkpoint.get("satisfied_gates", ()))
+        self.history = list(checkpoint.get("history", ()))
+        self.coordinate_shifts = int(checkpoint.get("coordinate_shifts", 0))
+        self.pruned_branches = int(checkpoint.get("pruned_branches", 0))
+        self._writes_locked = bool(checkpoint.get("writes_locked", False))
+        self._lock_reason = str(checkpoint.get("lock_reason", ""))
+        self._last_eta = checkpoint.get("last_eta")
+        gov = checkpoint.get("governor", {})
+        self.governor.history = list(gov.get("history", ()))
+        self.governor.drops = list(gov.get("drops", ()))
+        self.governor.directives = list(gov.get("directives", ()))
+        self.governor.shift_streak = int(gov.get("shift_streak", 0))
+        self.governor.recall_streak = int(gov.get("recall_streak", 0))
+        if self.registry is not None:
+            if self._writes_locked:
+                self.registry.isolate_writes(reason=self._lock_reason)
+            else:
+                self.registry.release_writes()
+
     def tick(
         self,
         candidate_state: Mapping[str, Any],
@@ -231,11 +497,19 @@ class EarlyAGIKernel:
         pruned_tails: Sequence[Mapping[str, Any]] | None = None,
         shift_artifact: ShiftArtifact | Mapping[str, Any] | None = None,
         label: str = "",
+        *,
+        gate_results: Mapping[str, GateResult] | None = None,
+        verified_drop: float | None = None,
+        entanglement: EntanglementReport | None = None,
+        eta_cog: float | None = None,
+        governor_directive: Directive | None = None,
+        commit_gate_state: bool = True,
     ) -> TickResult:
         cost = cost or CognitiveStepCost()
         matrix = np.asarray(coupling_matrix, dtype=np.float64)
+        if (eta_cog is None) != (governor_directive is None):
+            raise ValueError("eta_cog and governor_directive must be supplied together")
 
-        # 1. Export pruned branches before anything can depend on them.
         for tail in pruned_tails or ():
             self.sink.put(
                 "pruned_branch",
@@ -246,18 +520,23 @@ class EarlyAGIKernel:
             )
             self.pruned_branches += 1
 
-        # 2. Measure entanglement of the active problem graph.
-        entanglement = self.backend.measure_entanglement(matrix, self.chi_max, self.tau)
+        if entanglement is None:
+            entanglement = self.backend.measure_entanglement(matrix, self.chi_max, self.tau)
+        if gate_results is None or verified_drop is None:
+            gate_results, verified_drop = self._gate_delta(candidate_state, commit=commit_gate_state)
+        else:
+            gate_results = dict(gate_results)
+            if commit_gate_state:
+                self.apply_gate_results(gate_results)
+        if eta_cog is None or governor_directive is None:
+            eta_cog, governor_directive = self.governor.evaluate(verified_drop, cost, entanglement)
 
-        # 3. Dark-state gates -> verified (not claimed) entropy collapse.
-        gate_results, verified_drop = self._gate_delta(candidate_state)
-
-        # 4. Governor decides.
-        eta_cog, governor_directive = self.governor.evaluate(verified_drop, cost, entanglement)
-
-        # 5. Trap 2: the fast executor cannot patch its way out of a shift.
         artifact = self._coerce_artifact(shift_artifact)
-        artifact_ok, artifact_error = artifact.validate() if artifact is not None else (False, "")
+        artifact_ok, artifact_error = (
+            artifact.validate(state=candidate_state, entanglement=entanglement)
+            if artifact is not None
+            else (False, "")
+        )
         directive = governor_directive
         shift_held = False
 
@@ -270,7 +549,6 @@ class EarlyAGIKernel:
         elif governor_directive is Directive.SHIFT_COORDINATE and self.lock_writes_on_shift:
             self._engage_lock(f"SHIFT_COORDINATE (eta={eta_cog:.2f})")
 
-        # 6. Archive the UV state (and the reframing, at a coarser scale).
         payload = {
             "label": label,
             "state": dict(candidate_state),
@@ -328,7 +606,6 @@ class EarlyAGIKernel:
         self._last_eta = eta_cog
         return result
 
-    # -- internals ----------------------------------------------------------
     @staticmethod
     def _coerce_artifact(
         raw: ShiftArtifact | Mapping[str, Any] | None,
@@ -341,7 +618,9 @@ class EarlyAGIKernel:
             return ShiftArtifact.from_mapping(raw)
         raise TypeError(f"shift_artifact must be a ShiftArtifact or mapping, got {type(raw).__name__}")
 
-    def _gate_delta(self, candidate_state: Mapping[str, Any]) -> tuple[dict[str, GateResult], float]:
+    def _gate_delta(
+        self, candidate_state: Mapping[str, Any], *, commit: bool = True
+    ) -> tuple[dict[str, GateResult], float]:
         results: dict[str, GateResult] = {}
         newly_verified = 0.0
         broken = 0.0
@@ -350,11 +629,12 @@ class EarlyAGIKernel:
             results[gate.name] = result
             if result.passed is True and gate.name not in self.satisfied_gates:
                 newly_verified += gate.bits
-                self.satisfied_gates.add(gate.name)
+                if commit:
+                    self.satisfied_gates.add(gate.name)
             elif result.passed is False and gate.name in self.satisfied_gates:
                 broken += gate.bits
-                self.satisfied_gates.discard(gate.name)
-            # None: unverifiable, so neither awarded nor charged
+                if commit:
+                    self.satisfied_gates.discard(gate.name)
         return results, newly_verified - broken
 
     def snapshot(self) -> dict[str, Any]:

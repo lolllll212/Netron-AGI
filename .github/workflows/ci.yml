@@ -30,6 +30,12 @@ jobs:
         run: python -m pytest
       - name: Demo (offline, no API key)
         run: python -m early_agi.demo
+      - name: Gauge frontend, IR, and VM
+        run: |
+          python -m early_agi.gauge check examples/netron_solve.gauge --compact --no-dotenv
+          python -m early_agi.gauge compile examples/netron_solve.gauge --compact --no-dotenv > gauge-ir.json
+          python -m early_agi.gauge run examples/netron_solve.gauge --root . --compact --no-dotenv --output gauge-run.json
+          python -c "import json; d=json.load(open('gauge-run.json', encoding='utf-8')); assert d['ok'], d['violations']"
 
   lint:
     name: lint (ruff, pinned)
@@ -41,11 +47,27 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install pinned ruff
-        run: python -m pip install "ruff==0.17.3"
+        run: python -m pip install "ruff==0.17.6"
       - name: Lint
         run: ruff check --output-format=github .
       - name: Format
         run: ruff format --check .
+
+  verify:
+    name: optional Z3 verifier
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install verifier extra
+        run: python -m pip install -e ".[dev,verify]"
+      - name: Z3 is importable
+        run: python -c "import z3; s=z3.Solver(); s.add(z3.Bool('x')); assert str(s.check()) == 'sat'"
+      - name: Tests with verifier available
+        run: python -m pytest
 
   package:
     name: package builds

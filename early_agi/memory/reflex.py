@@ -24,6 +24,7 @@ a lineage back to the traces that justified it.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,14 +40,33 @@ __all__ = [
     "ReflexLibrary",
     "compile_reflexes",
     "content_sha",
+    "task_signature",
 ]
 
+_STOPWORDS = frozenset({"a", "an", "and", "for", "from", "in", "of", "or", "the", "to", "with"})
 
-def content_sha(text: str | None) -> str | None:
+
+def content_sha(text: str | bytes | None) -> str | None:
     """Content hash used to pin a reflex to the exact pre-state it learned on."""
     if text is None:
         return None
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    raw = text.encode("utf-8") if isinstance(text, str) else bytes(text)
+    return hashlib.sha256(raw).hexdigest()
+
+
+def task_signature(task: str | None) -> str | None:
+    """Stable, order-insensitive signature of a task's meaningful tokens."""
+    if not task:
+        return None
+    tokens = {
+        token
+        for token in re.findall(r"[a-z0-9_]+", task.casefold())
+        if len(token) > 1 and token not in _STOPWORDS
+    }
+    if not tokens:
+        return None
+    canonical = " ".join(sorted(tokens))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass(frozen=True)
@@ -64,8 +84,8 @@ class ReflexEdit:
         if not target.exists():
             return None in self.before_sha
         try:
-            return content_sha(target.read_text(encoding="utf-8")) in self.before_sha
-        except (OSError, UnicodeDecodeError):
+            return content_sha(target.read_bytes()) in self.before_sha
+        except OSError:
             return False
 
     def as_dict(self) -> dict[str, Any]:
@@ -95,6 +115,7 @@ class CompiledReflex:
     rule: str = ""
     hits: int = 0
     misses: int = 0
+    task_signatures: tuple[str, ...] = ()
 
     @property
     def short(self) -> str:
@@ -114,6 +135,7 @@ class CompiledReflex:
             "support": self.support,
             "hits": self.hits,
             "misses": self.misses,
+            "task_signatures": list(self.task_signatures),
         }
 
 
@@ -136,6 +158,13 @@ class ReflexCompileReport:
 def _passing(payload: Mapping[str, Any]) -> set[str]:
     gates = payload.get("gates") or {}
     return {str(name) for name, verdict in gates.items() if verdict == "pass"}
+
+
+def _payload_task(payload: Mapping[str, Any]) -> str:
+    state = payload.get("state")
+    if isinstance(state, Mapping):
+        return str(state.get("task", ""))
+    return str(payload.get("task", ""))
 
 
 def _features(payload: Mapping[str, Any]) -> set[str]:
@@ -222,6 +251,13 @@ def compile_reflexes(
             )
             continue
         pattern = sorted(set.intersection(*(_features(traces[parent].payload) for parent in parents)))
+        task_signatures = sorted(
+            {
+                task_sig
+                for parent in parents
+                if (task_sig := task_signature(_payload_task(traces[parent].payload)))
+            }
+        )
 
         # Union of the pre-states every occurrence was learned against: a reflex
         # may fire on any state it has actually seen, never on an unseen one.
@@ -249,6 +285,7 @@ def compile_reflexes(
                 "edits": edits,
                 "expected_gates": expected,
                 "pattern": pattern,
+                "task_signatures": task_signatures,
             },
             scale=scale,
             eta_cog=None,
@@ -311,16 +348,29 @@ class ReflexLibrary:
                     rule=rules[0] if rules else "",
                     hits=sum(1 for ok in history if ok),
                     misses=sum(1 for ok in history if not ok),
+                    task_signatures=tuple(
+                        str(item) for item in payload.get("task_signatures", ()) if isinstance(item, str)
+                    ),
                 )
             )
         return sorted(compiled, key=lambda reflex: (len(reflex.expected_gates), reflex.support), reverse=True)
 
     # -- execution ----------------------------------------------------------
-    def match(self, root: str | Path) -> CompiledReflex | None:
-        """Best live reflex whose learned pre-states all still hold, if any."""
+    def match(
+        self,
+        root: str | Path,
+        *,
+        task: str | None = None,
+        context: Mapping[str, Any] | None = None,
+    ) -> CompiledReflex | None:
+        """Best live reflex whose task and learned pre-states all still hold."""
+        requested_task = task if task is not None else (context or {}).get("task")
+        signature = task_signature(str(requested_task)) if requested_task is not None else None
         best: CompiledReflex | None = None
         for reflex in self.reflexes():
             if reflex.misses >= self.miss_limit:
+                continue
+            if signature is not None and signature not in reflex.task_signatures:
                 continue
             if not all(edit.accepts(root) for edit in reflex.edits):
                 continue

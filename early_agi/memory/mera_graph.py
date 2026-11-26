@@ -1,21 +1,10 @@
-"""MERA-style scale memory: L0 (UV traces) -> Lk (IR rules).
-
-The cold sink holds every trace at scale 0. Consolidation is the renormalisation
-step: read the high-eta traces, build a gate/directive feature matrix, truncate
-it with the *same* SVD backend the kernel uses, and emit one rule node per
-cluster at scale+1. Rules are written back through the sink, so coarse nodes are
-as lossless as the traces they summarise.
-
-Rule *invention* by a model is Phase 4. Reflex compilation — turning a recurring
-gated edit batch into a zero-LLM replay — lives in :mod:`early_agi.memory.reflex`
-and consumes the same store: the ``applied_edit`` traces plus the ``rule`` nodes
-emitted here.
-"""
+"""MERA-style scale memory with backend-driven truncation."""
 
 from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -27,7 +16,7 @@ import numpy as np
 
 from ..backends.base import RelaxationBackend
 from ..backends.classical_svd import ClassicalSVDBackend
-from ..core.cold_sink import ColdSink, SinkRecord
+from ..core.cold_sink import ColdSink, SinkRecord, canonical_json
 
 __all__ = ["CoarseGrainReport", "MeraGraph"]
 
@@ -107,12 +96,13 @@ class MeraGraph:
         self.sink = sink
         self.db_path = str(db_path)
         self.backend = backend or ClassicalSVDBackend()
+        self._lock = threading.RLock()
         if self.db_path != ":memory:":
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.db_path, isolation_level=None)
-        self._conn.executescript(_SCHEMA)
+        self._conn = sqlite3.connect(self.db_path, isolation_level=None, check_same_thread=False)
+        with self._lock:
+            self._conn.executescript(_SCHEMA)
 
-    # -- indexing -----------------------------------------------------------
     def put_node(
         self,
         kind: str,
@@ -124,29 +114,22 @@ class MeraGraph:
         weight: float = 1.0,
     ) -> str:
         digest = self.sink.put(kind, payload, scale=scale, parent_hash=parent_hash, eta_cog=eta_cog)
-        self._conn.execute(
-            "INSERT OR IGNORE INTO nodes (hash, scale, kind, payload, parent_hash, eta_cog, weight, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                digest,
-                scale,
-                kind,
-                json.dumps(dict(payload), sort_keys=True, default=str),
-                parent_hash,
-                eta_cog,
-                weight,
-                time.time(),
-            ),
-        )
+        encoded = canonical_json(dict(payload))
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO nodes (hash, scale, kind, payload, parent_hash, eta_cog, weight, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (digest, scale, kind, encoded, parent_hash, eta_cog, weight, time.time()),
+            )
         return digest
 
     def link(self, src: str, dst: str, relation: str, weight: float = 1.0) -> None:
-        self._conn.execute(
-            "INSERT OR IGNORE INTO edges (src, dst, relation, weight) VALUES (?, ?, ?, ?)",
-            (src, dst, relation, float(weight)),
-        )
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO edges (src, dst, relation, weight) VALUES (?, ?, ?, ?)",
+                (src, dst, relation, float(weight)),
+            )
 
-    # -- renormalisation ----------------------------------------------------
     def coarse_grain(
         self,
         scale: int = 0,
@@ -180,10 +163,18 @@ class MeraGraph:
 
         report = self.backend.measure_entanglement(matrix, chi_max=chi_max, tau=tau)
         k = max(1, min(int(report.effective_rank) or 1, len(records) - 1, chi_max))
-        u, _, _ = np.linalg.svd(matrix, full_matrices=False)
-        # Partition by orthant in the truncated Schmidt basis: deterministic, and
-        # unlike argmax on |U| it separates the leading contrast at k >= 2.
-        signs = np.where(u[:, :k] >= 0.0, 1, -1)
+        # Honour both halves of the backend contract; do not bypass the seam with
+        # a hard-coded numpy decomposition.
+        np.asarray(self.backend.truncate(matrix, chi_max=k))
+        left_basis = getattr(self.backend, "left_basis", None)
+        if left_basis is not None:
+            u = np.asarray(left_basis(matrix, k=k), dtype=np.float64)
+        else:  # pragma: no cover - compatibility fallback for older custom backends
+            u, _, _ = np.linalg.svd(matrix, full_matrices=False)
+        if u.ndim != 2:
+            u = u.reshape(len(records), -1)
+        k = min(k, u.shape[1]) if u.shape[1] else 0
+        signs = np.where(u[:, :k] >= 0.0, 1, -1) if k else np.ones((len(records), 1), dtype=int)
         buckets: dict[tuple[int, ...], list[SinkRecord]] = {}
         for row_index, record in enumerate(records):
             key = tuple(int(value) for value in signs[row_index])
@@ -218,19 +209,20 @@ class MeraGraph:
             for member in members:
                 self.link(member.hash, digest, "absorbed_by", 1.0 / len(members))
 
-        self._conn.execute(
-            "INSERT OR REPLACE INTO levels (scale, clusters, support, truncation, entropy, rule, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                scale + 1,
-                len(rule_hashes),
-                support_total,
-                report.truncation_error,
-                report.spectral_entropy_bits,
-                json.dumps({"vocabulary": vocabulary[:32], "k": k}, sort_keys=True),
-                time.time(),
-            ),
-        )
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO levels (scale, clusters, support, truncation, entropy, rule, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    scale + 1,
+                    len(rule_hashes),
+                    support_total,
+                    report.truncation_error,
+                    report.spectral_entropy_bits,
+                    json.dumps({"vocabulary": vocabulary[:32], "k": k}, sort_keys=True),
+                    time.time(),
+                ),
+            )
         return CoarseGrainReport(
             scale=scale,
             records=len(records),
@@ -241,7 +233,6 @@ class MeraGraph:
             spectral_entropy_bits=report.spectral_entropy_bits,
         )
 
-    # -- queries ------------------------------------------------------------
     def nodes(self, scale: int | None = None, kind: str | None = None) -> list[dict[str, Any]]:
         sql = "SELECT hash, scale, kind, payload, parent_hash, eta_cog, weight FROM nodes WHERE 1=1"
         params: list[Any] = []
@@ -252,6 +243,8 @@ class MeraGraph:
             sql += " AND kind = ?"
             params.append(kind)
         sql += " ORDER BY scale ASC, created_at ASC, hash ASC"
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
         return [
             {
                 "hash": row[0],
@@ -262,7 +255,7 @@ class MeraGraph:
                 "eta_cog": row[5],
                 "weight": row[6],
             }
-            for row in self._conn.execute(sql, params).fetchall()
+            for row in rows
         ]
 
     def rules(self, *, scale: int | None = None, min_support: int = 1) -> list[dict[str, Any]]:
@@ -276,18 +269,17 @@ class MeraGraph:
         return self.sources(rule_hash, "absorbed_by")
 
     def sources(self, digest: str, relation: str = "compiled_from") -> list[str]:
-        """Inbound edges of one relation: what this node was built from."""
-        return [
-            row[0]
-            for row in self._conn.execute(
+        with self._lock:
+            rows = self._conn.execute(
                 "SELECT src FROM edges WHERE dst = ? AND relation = ? ORDER BY src", (digest, relation)
             ).fetchall()
-        ]
+        return [row[0] for row in rows]
 
     def levels(self) -> list[dict[str, Any]]:
-        rows = self._conn.execute(
-            "SELECT scale, clusters, support, truncation, entropy, rule, created_at FROM levels ORDER BY scale"
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT scale, clusters, support, truncation, entropy, rule, created_at FROM levels ORDER BY scale"
+            ).fetchall()
         return [
             {
                 "scale": row[0],
@@ -302,8 +294,14 @@ class MeraGraph:
         ]
 
     def reflex_candidates(self, min_support: int = 2) -> list[dict[str, Any]]:
-        """Recurring rules: the input to Phase-3 reflex compilation."""
         return self.rules(min_support=min_support)
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
+
+    def __enter__(self) -> MeraGraph:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()

@@ -1,18 +1,4 @@
-"""Deterministic dark-state verifiers.
-
-A dark state is one a constraint kills: ``L_k |psi*> = 0``. The engineering
-version of that statement is cheaper and stricter — the gate is an executable
-predicate over the workspace, and only a *verified* collapse of uncertainty is
-allowed to pay entropy back into ``eta_cog``.
-
-Gates are tri-state on purpose:
-
-* ``True``  — the invariant holds; award its bits (once per satisfaction).
-* ``False`` — the invariant is broken; charge its bits retroactively.
-* ``None``  — the verifier could not run (missing tool, no tests, timeout). It
-  awards nothing and breaks nothing, so a missing ``z3`` cannot manufacture
-  efficiency and a crashed linter cannot fake a regression.
-"""
+"""Deterministic dark-state verifiers with true tri-state semantics."""
 
 from __future__ import annotations
 
@@ -59,17 +45,10 @@ Check = Callable[[Mapping[str, Any]], bool | GateResult | None]
 
 
 def _fail(detail: str) -> GateResult:
-    """Signal a *verified* negative from inside a gate check.
-
-    Raising would be indistinguishable from a broken verifier, which the gate
-    deliberately treats as neutral. The name/bits are overwritten by callers.
-    """
     return GateResult("<gate>", False, 0.0, detail)
 
 
 class DarkStateGate:
-    """A named predicate with an entropy weight."""
-
     def __init__(self, name: str, check: Check, bits: float = 1.0) -> None:
         if not name:
             raise ValueError("gate needs a name")
@@ -80,7 +59,7 @@ class DarkStateGate:
     def evaluate(self, state: Mapping[str, Any]) -> GateResult:
         try:
             raw = self._check(state)
-        except Exception as exc:  # a verifier crash must be neutral, not a failure
+        except Exception as exc:
             return GateResult(self.name, None, self.bits, f"{type(exc).__name__}: {exc}")
         if isinstance(raw, GateResult):
             return GateResult(self.name, raw.passed, self.bits, raw.detail)
@@ -88,16 +67,13 @@ class DarkStateGate:
             return GateResult(self.name, None, self.bits, "verifier unavailable")
         return GateResult(self.name, bool(raw), self.bits, "")
 
-    def __repr__(self) -> str:  # pragma: no cover - cosmetics
+    def __repr__(self) -> str:  # pragma: no cover
         return f"DarkStateGate({self.name!r}, bits={self.bits})"
 
 
-# ---------------------------------------------------------------------------
-# Workspace resolution
-# ---------------------------------------------------------------------------
 def _root(state: Mapping[str, Any]) -> Path:
     root = state.get("repo_root")
-    return Path(root) if root else Path.cwd()
+    return Path(root).resolve() if root else Path.cwd().resolve()
 
 
 def _targets(state: Mapping[str, Any]) -> list[Path]:
@@ -126,19 +102,19 @@ def _sources(state: Mapping[str, Any]) -> dict[Path, str]:
             continue
         try:
             out[path] = path.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
     return out
 
 
 def _ignored(path: Path, root: Path) -> bool:
-    parts = set(path.relative_to(root).parts)
+    try:
+        parts = set(path.relative_to(root).parts)
+    except ValueError:
+        return True
     return bool(parts & {".venv", "venv", "__pycache__", "node_modules", "build", "dist", ".git"})
 
 
-# ---------------------------------------------------------------------------
-# AST syntax gate
-# ---------------------------------------------------------------------------
 def ast_syntax_gate(name: str = "syntax_ok", bits: float = 2.0) -> DarkStateGate:
     def check(state: Mapping[str, Any]) -> bool | None:
         sources = _sources(state)
@@ -162,9 +138,6 @@ def ast_syntax_gate(name: str = "syntax_ok", bits: float = 2.0) -> DarkStateGate
     return DarkStateGate(name, check, bits)
 
 
-# ---------------------------------------------------------------------------
-# Ruff gate
-# ---------------------------------------------------------------------------
 def _ruff_command() -> list[str] | None:
     if shutil.which("ruff"):
         return ["ruff"]
@@ -198,16 +171,12 @@ def ruff_gate(name: str = "lint_ok", bits: float = 1.5, timeout: float = 30.0) -
     return DarkStateGate(name, check, bits)
 
 
-# ---------------------------------------------------------------------------
-# Pytest gate
-# ---------------------------------------------------------------------------
 def run_pytest(
     root: str | Path,
     paths: Sequence[str] = (),
     *,
     timeout: float = 180.0,
 ) -> dict[str, Any]:
-    """Run pytest in ``root``; ``passed`` is None when the outcome is unknown."""
     command = [sys.executable, "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider", *paths]
     try:
         completed = subprocess.run(
@@ -228,10 +197,8 @@ def run_pytest(
         passed: bool | None = True
     elif completed.returncode == 1:
         passed = False
-    elif completed.returncode == 5:
-        passed = None  # no tests collected
     else:
-        passed = None  # interrupted / usage error / internal error
+        passed = None
     return {
         "returncode": completed.returncode,
         "passed": passed,
@@ -257,14 +224,11 @@ def pytest_gate(
     return DarkStateGate(name, check, bits)
 
 
-# ---------------------------------------------------------------------------
-# Z3 gate / SMT runner
-# ---------------------------------------------------------------------------
 def run_z3_smt2(smt2: str, *, timeout_ms: int = 5000) -> dict[str, Any]:
-    """Solve an SMT-LIB2 script. Raises if z3-solver is not installed."""
+    """Solve SMT-LIB2. ``passed`` is True for unsat, False for sat, None otherwise."""
     try:
         import z3  # type: ignore import-not-found
-    except ImportError as exc:  # pragma: no cover - depends on environment
+    except ImportError as exc:
         raise RuntimeError("z3-solver is not installed; pip install 'early-agi[verify]'") from exc
 
     solver = z3.Solver()
@@ -273,40 +237,67 @@ def run_z3_smt2(smt2: str, *, timeout_ms: int = 5000) -> dict[str, Any]:
         solver.from_string(smt2)
         outcome = solver.check()
     except z3.Z3Exception as exc:
-        return {"status": "error", "detail": str(exc)}
-    return {
-        "status": str(outcome),
-        "detail": str(solver.model()) if outcome == z3.sat else "",
-    }
+        return {"status": "error", "passed": None, "detail": str(exc)}
+    status = str(outcome)
+    if status == "unsat":
+        passed: bool | None = True
+        detail = ""
+    elif status == "sat":
+        passed = False
+        detail = str(solver.model())
+    else:
+        passed = None
+        detail = f"solver returned {status}"
+    return {"status": status, "passed": passed, "detail": detail}
 
 
 def z3_gate(
-    builder: Callable[[Mapping[str, Any]], bool],
+    builder: Callable[[Mapping[str, Any]], str | bool | None],
     name: str = "constraints_proved",
     bits: float = 3.0,
+    *,
+    timeout_ms: int = 5000,
 ) -> DarkStateGate:
+    """A real Z3 gate. The builder returns SMT-LIB2 text, a bool, or None."""
+
     def check(state: Mapping[str, Any]) -> bool | None:
         if importlib.util.find_spec("z3") is None:
             return None
-        return bool(builder(state))
+        target = builder(state)
+        if target is None:
+            return None
+        if isinstance(target, bool):
+            return target
+        if not isinstance(target, str):
+            return None
+        result = run_z3_smt2(target, timeout_ms=timeout_ms)
+        if result["passed"] is False:
+            return _fail(str(result.get("detail", "constraint refuted"))[:1500])
+        return result["passed"]
 
     return DarkStateGate(name, check, bits)
 
 
-# ---------------------------------------------------------------------------
-# Convenience wiring
-# ---------------------------------------------------------------------------
+smt2_gate = z3_gate
+
+
 def build_standard_gates(
     *,
     include_pytest: bool = True,
     include_ruff: bool = True,
     pytest_targets: Sequence[str] = (),
+    include_z3: bool = False,
+    z3_builder: Callable[[Mapping[str, Any]], str | bool | None] | None = None,
 ) -> list[DarkStateGate]:
     gates = [ast_syntax_gate()]
     if include_ruff:
         gates.append(ruff_gate())
     if include_pytest:
         gates.append(pytest_gate(targets=pytest_targets))
+    if include_z3:
+        if z3_builder is None:
+            raise ValueError("include_z3=True requires z3_builder")
+        gates.append(z3_gate(z3_builder))
     return gates
 
 

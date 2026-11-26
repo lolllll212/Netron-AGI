@@ -1,15 +1,4 @@
-"""Dual-tier routing: Fast Executor for CRYSTALLIZE, Deep Reasoner for SHIFT.
-
-Two hard rules, both enforced by the kernel rather than by prompt etiquette:
-
-* the fast tier may only emit file edits;
-* when coordinates must shift, edits are rejected outright and the deep tier
-  must emit a decomposition, an invariant check, or a new operator.
-
-The router is the producer; the kernel is the gatekeeper. Validation lives in
-:mod:`early_agi.core.kernel` so a model response can never widen the loop's
-invariants.
-"""
+"""Dual-tier routing: Fast Executor for CRYSTALLIZE, Deep Reasoner for SHIFT."""
 
 from __future__ import annotations
 
@@ -20,7 +9,7 @@ from typing import Any, Protocol
 
 from ..core.cold_sink import canonical_json
 from ..core.kernel import ShiftArtifact
-from .client import OpenAICompatibleClient
+from .client import LLMUnavailable, OpenAICompatibleClient
 
 __all__ = [
     "DualTierRouter",
@@ -29,6 +18,7 @@ __all__ = [
     "RouterError",
     "ScriptedRouter",
     "TurnProposal",
+    "is_safe_relative",
     "parse_shift",
     "parse_turn",
 ]
@@ -37,7 +27,7 @@ EXECUTOR_SYSTEM = """You are the FAST EXECUTOR of a code-repair kernel.
 
 Emit at most a few surgical file edits that reduce the entropy of the task.
 Rules:
-- Never invent paths. Only edit files listed in "files".
+- Never invent paths. Only edit files listed in "files"; the parser also enforces this.
 - Return complete file contents, not diffs.
 - Obey "writes_locked": when it is true, return {"edits": [], "rationale": "writes isolated"}.
 - Respond with JSON only, shaped exactly:
@@ -93,17 +83,27 @@ class TurnProposal:
             "rationale": self.rationale,
             "rejected": list(self.rejected),
             "tokens": self.tokens,
+            "latency_ms": round(self.latency_ms, 3),
         }
 
 
-def _is_safe_relative(path: str) -> bool:
+def is_safe_relative(path: str) -> bool:
     if not path or path.startswith(("/", "\\")) or ":" in path.split("/")[0]:
         return False
     parts = [part for part in path.replace("\\", "/").split("/") if part not in ("", ".")]
     return bool(parts) and ".." not in parts
 
 
-def parse_turn(data: Any, *, tokens: int = 0, latency_ms: float = 0.0) -> TurnProposal:
+_is_safe_relative = is_safe_relative
+
+
+def parse_turn(
+    data: Any,
+    *,
+    tokens: int = 0,
+    latency_ms: float = 0.0,
+    allowed_paths: Sequence[str] | None = None,
+) -> TurnProposal:
     """Validate a fast-tier response into a proposal."""
     if isinstance(data, list):
         data = {"edits": data}
@@ -117,6 +117,7 @@ def parse_turn(data: Any, *, tokens: int = 0, latency_ms: float = 0.0) -> TurnPr
     if not isinstance(raw_edits, Sequence) or isinstance(raw_edits, (str, bytes)):
         raise RouterError("'edits' must be a list")
 
+    allowed = set(allowed_paths) if allowed_paths is not None else None
     edits: list[Edit] = []
     rejected: list[Mapping[str, Any]] = []
     for item in raw_edits:
@@ -127,8 +128,11 @@ def parse_turn(data: Any, *, tokens: int = 0, latency_ms: float = 0.0) -> TurnPr
         if not isinstance(path, str) or not isinstance(content, str):
             rejected.append({"reason": "edit needs string 'path' and 'content'", "path": path})
             continue
-        if not _is_safe_relative(path):
+        if not is_safe_relative(path):
             rejected.append({"reason": "path is not a safe relative path", "path": path})
+            continue
+        if allowed is not None and path not in allowed:
+            rejected.append({"reason": "path is not in the declared edit allowlist", "path": path})
             continue
         edits.append(Edit(path=path, content=content))
 
@@ -143,11 +147,18 @@ def parse_turn(data: Any, *, tokens: int = 0, latency_ms: float = 0.0) -> TurnPr
     )
 
 
-def parse_shift(data: Any) -> ShiftArtifact:
+def parse_shift(data: Any, *, tokens: int = 0, latency_ms: float = 0.0) -> ShiftArtifact:
     """Validate a deep-tier response into a shift artefact."""
     if not isinstance(data, Mapping):
         raise RouterError(f"reasoner returned {type(data).__name__}, expected an object")
     artifact = ShiftArtifact.from_mapping(data)
+    artifact = ShiftArtifact(
+        kind=artifact.kind,
+        payload=artifact.payload,
+        rationale=artifact.rationale,
+        tokens=int(tokens),
+        latency_ms=float(latency_ms),
+    )
     ok, detail = artifact.validate()
     if not ok:
         raise RouterError(f"rejected coordinate shift: {detail}")
@@ -166,6 +177,10 @@ class DualTierRouter:
         from ..config import Settings
 
         settings = settings or Settings.from_env()
+        if not settings.llm_configured:
+            raise LLMUnavailable(
+                "live routing is disabled; set EARLY_AGI_LLM_ENABLED=1 and the model/endpoint variables"
+            )
         return cls(
             OpenAICompatibleClient.from_settings("fast", settings),
             OpenAICompatibleClient.from_settings("deep", settings),
@@ -173,11 +188,17 @@ class DualTierRouter:
 
     def execute(self, brief: Mapping[str, Any]) -> TurnProposal:
         data, reply = self.fast.chat_json(self._messages(EXECUTOR_SYSTEM, brief))
-        return parse_turn(data, tokens=reply.tokens, latency_ms=reply.latency_ms)
+        allowed = brief.get("files") if isinstance(brief, Mapping) else None
+        return parse_turn(
+            data,
+            tokens=reply.tokens,
+            latency_ms=reply.latency_ms,
+            allowed_paths=allowed,
+        )
 
     def reason(self, brief: Mapping[str, Any]) -> ShiftArtifact:
-        data, _reply = self.deep.chat_json(self._messages(REASONER_SYSTEM, brief))
-        return parse_shift(data)
+        data, reply = self.deep.chat_json(self._messages(REASONER_SYSTEM, brief))
+        return parse_shift(data, tokens=reply.tokens, latency_ms=reply.latency_ms)
 
     @staticmethod
     def _messages(system: str, brief: Mapping[str, Any]) -> list[dict[str, str]]:
@@ -204,12 +225,15 @@ class ScriptedRouter:
 
     def execute(self, brief: Mapping[str, Any]) -> TurnProposal:
         self.calls.append("execute")
+        allowed = brief.get("files") if isinstance(brief, Mapping) else None
         if not self._executions:
             if self.strict:
                 raise RouterError("no scripted execution left")
             return TurnProposal(rationale="scripted: no-op")
         item = self._executions.popleft()
-        return item if isinstance(item, TurnProposal) else parse_turn(item)
+        if isinstance(item, TurnProposal):
+            return item
+        return parse_turn(item, allowed_paths=allowed)
 
     def reason(self, brief: Mapping[str, Any]) -> ShiftArtifact:
         self.calls.append("reason")
@@ -217,7 +241,13 @@ class ScriptedRouter:
             if self.strict:
                 raise RouterError("no scripted shift left")
             return ShiftArtifact(
-                kind="invariant", payload={"check": "True"}, rationale="scripted: no-op reframe"
+                kind="invariant",
+                payload={"check": "True"},
+                rationale="scripted: no-op reframe",
+                tokens=0,
+                latency_ms=0.0,
             )
         item = self._shifts.popleft()
-        return item if isinstance(item, ShiftArtifact) else parse_shift(item)
+        if isinstance(item, ShiftArtifact):
+            return item
+        return parse_shift(item)
