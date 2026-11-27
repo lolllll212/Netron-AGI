@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .records import ArmState, mean, ratio
 
-__all__ = ["build_report"]
+__all__ = ["build_race_report", "build_report"]
 
 
 def build_report(benchmark: Any, arms: Mapping[str, ArmState]) -> dict[str, Any]:
@@ -73,6 +73,76 @@ def build_report(benchmark: Any, arms: Mapping[str, ArmState]) -> dict[str, Any]
         "curves": curves,
         "summary": summary,
     }
+
+
+def build_race_report(
+    benchmark: Any,
+    arms: Mapping[str, ArmState],
+    *,
+    race_state: ArmState,
+    race_summaries: Sequence[Mapping[str, Any]],
+    race_config: Any,
+) -> dict[str, Any]:
+    """Extend the untouched two-arm report with a deterministic netron_race arm."""
+    report = build_report(benchmark, arms)
+    baseline = arms["plain_retry"]
+    summaries = [dict(item) for item in race_summaries]
+    race_zero_regression = all(point.zero_regression for point in race_state.retention)
+    report["config"]["netron_race"] = {
+        "controller": "parallel_wal_branch_race",
+        "program": "RACE_BRANCHES",
+        "gate": "ast_syntax_gate+pytest_gate",
+        "trigger": "volume_law_or_frustration",
+        "router_name": str(race_config.router_name),
+        "endpoint": str(race_config.endpoint),
+        "model": str(race_config.model),
+        "branches": list(race_config.branches),
+        "gates": list(race_config.gates),
+        "seed": int(race_config.seed),
+        "max_tokens_per_branch": int(race_config.max_tokens_per_branch),
+        "max_workers": int(race_config.max_workers),
+        "executor": str(race_config.executor),
+        "offline": True,
+    }
+    report["arms"]["netron_race"] = {
+        **race_state.as_dict(),
+        "controller": "parallel_wal_branch_race",
+        "race_summaries": summaries,
+    }
+    winner_eta = [float((item.get("winner") or {}).get("eta_cog", 0.0) or 0.0) for item in summaries]
+    winner_branches = [str(item.get("winner_branch_id", "")) for item in summaries]
+    pruned = [int(item.get("pruned_branches", 0)) for item in summaries]
+    tokens = [int(item.get("total_tokens", 0)) for item in summaries]
+    lineage = [int(item.get("lineage_edges", 0)) for item in summaries]
+    report["curves"]["branch_race"] = {
+        "tasks": [task.task_index for task in race_state.tasks],
+        "winner_eta_cog": [round(value, 6) for value in winner_eta],
+        "winner_branch_ids": winner_branches,
+        "pruned_branches": pruned,
+        "total_tokens": tokens,
+        "lineage_edges": lineage,
+        "green_winners": [str(item.get("winner_hash", "")) != "" for item in summaries],
+        "executors": [str(item.get("executor", "")) for item in summaries],
+        "sandbox_modes": [list(item.get("sandbox_modes", ())) for item in summaries],
+        "network_calls": 0,
+        "offline": True,
+    }
+    summary = report["summary"]
+    summary["netron_race_solved"] = race_state.solved_count
+    summary["netron_race_tokens_saved"] = baseline.tokens_spent - race_state.tokens_spent
+    summary["netron_race_rollbacks_avoided"] = baseline.rollbacks - race_state.rollbacks
+    summary["branch_race_pruned_branches"] = sum(pruned)
+    summary["branch_race_lineage_edges"] = sum(lineage)
+    summary["branch_race_tokens"] = race_state.tokens_spent
+    summary["zero_regression"] = bool(summary["zero_regression"] and race_zero_regression)
+    summary["ok"] = bool(
+        summary["ok"]
+        and race_state.solved_count == len(benchmark.task_ids)
+        and race_zero_regression
+        and all(bool(item.get("ok", False)) for item in summaries)
+        and all(int(item.get("network_calls", 1)) == 0 for item in summaries)
+    )
+    return report
 
 
 def discovery_curve(benchmark: Any, baseline: ArmState, netron: ArmState) -> dict[str, Any]:

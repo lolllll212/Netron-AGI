@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import DEFAULT_BASE_URL
+from .race_benchmark import run_race_ab_benchmark
 from .routers import OpenAICompatiblePatchRouter
 from .runner import run_ab_benchmark
 
@@ -36,6 +37,34 @@ def _parser() -> argparse.ArgumentParser:
         help="patch router (default: offline; no network)",
     )
     parser.add_argument("--allow-live", action="store_true", help="explicitly permit OpenAI-compatible calls")
+    parser.add_argument(
+        "--race",
+        action="store_true",
+        help="add the strictly offline netron_race WAL branch-racing arm",
+    )
+    parser.add_argument(
+        "--endpoint",
+        default=os.getenv("EARLY_AGI_RACE_ENDPOINT", ""),
+        help="offline-only endpoint label for the netron_race mocked transport",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="deterministic branch-race seed (default: 0)",
+    )
+    parser.add_argument(
+        "--max-tokens-per-branch",
+        type=int,
+        default=4096,
+        help="hard token cap for each netron_race branch (default: 4096)",
+    )
+    parser.add_argument(
+        "--race-workers",
+        type=int,
+        default=4,
+        help="maximum netron_race worker processes (default: 4)",
+    )
     parser.add_argument(
         "--base-url",
         default=os.getenv("EARLY_AGI_BASE_URL", DEFAULT_BASE_URL),
@@ -76,23 +105,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.router == "openai" and not args.allow_live:
         parser.error("--router openai requires --allow-live")
+    if args.race and args.router == "openai":
+        parser.error("--race is strictly offline and cannot be combined with --router openai")
 
     router = None
     if args.router == "openai":
         router = OpenAICompatiblePatchRouter(
-            base_url=args.base_url,
+            base_url=args.endpoint or args.base_url,
             model=args.model,
             api_key=os.getenv(args.api_key_env, ""),
             timeout_s=args.timeout,
             enabled=True,
         )
     try:
-        report = run_ab_benchmark(
-            router=router,
-            k=args.k,
-            sequential_tasks=args.tasks,
-            timeout_s=args.timeout,
-        )
+        if args.race:
+            report = run_race_ab_benchmark(
+                k=args.k,
+                sequential_tasks=args.tasks,
+                timeout_s=args.timeout,
+                endpoint=args.endpoint,
+                model=args.model,
+                seed=args.seed,
+                max_tokens_per_branch=args.max_tokens_per_branch,
+                max_workers=args.race_workers,
+            )
+        else:
+            report = run_ab_benchmark(
+                router=router,
+                k=args.k,
+                sequential_tasks=args.tasks,
+                timeout_s=args.timeout,
+            )
         status = 0 if report["summary"]["ok"] else 1
     except Exception as exc:
         report = {

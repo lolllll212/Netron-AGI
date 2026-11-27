@@ -106,6 +106,14 @@ class ProbeStmt:
 
 
 @dataclass(frozen=True, slots=True)
+class RaceStmt:
+    branches: list[str]
+    gates: list[str]
+    winner: str
+    span: Span
+
+
+@dataclass(frozen=True, slots=True)
 class CollapseStmt:
     target: str | None
     manifold: str
@@ -216,6 +224,7 @@ __all__ = [
     "OpDecl",
     "ProbeStmt",
     "Program",
+    "RaceStmt",
     "RecallStmt",
     "ScaleDecl",
     "Statement",

@@ -200,6 +200,18 @@ class GaugeParser:
             end = self.expect("PUNCT", "]")
             return g.ProbeStmt(manifold, ops, kw.span.merge(end.span))
 
+        if kw := self.match_word("race"):
+            self.expect("PUNCT", "[")
+            branches = self.parse_ident_list("]")
+            self.expect("PUNCT", "]")
+            self.expect("IDENT", "under")
+            self.expect("PUNCT", "[")
+            gates = self.parse_ident_list("]")
+            self.expect("PUNCT", "]")
+            self.expect("ARROW")
+            winner = self.expect("IDENT")
+            return g.RaceStmt(branches, gates, winner.value, kw.span.merge(winner.span))
+
         if kw := self.match_word("recall"):
             if self.match_word("analogy"):
                 self.expect("IDENT", "where")

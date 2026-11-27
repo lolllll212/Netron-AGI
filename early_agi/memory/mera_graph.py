@@ -9,6 +9,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,9 +19,13 @@ import numpy as np
 from ..backends.base import RelaxationBackend
 from ..backends.classical_svd import ClassicalSVDBackend
 from ..core.adaptation.signatures import AnalogicalMatcher, AnalogyMatch, StructuralSignature
-from ..core.cold_sink import ColdSink, SinkRecord, canonical_json
+from ..core.cold_sink import ColdSink, SinkRecord, SinkScope, canonical_json
 
-__all__ = ["CoarseGrainReport", "MeraGraph"]
+__all__ = ["MERGED", "SUPERSEDED", "CoarseGrainReport", "MeraGraph"]
+
+SUPERSEDED = "SUPERSEDED"
+MERGED = "MERGED"
+_LINEAGE_RETIRE_RELATIONS = (SUPERSEDED, MERGED)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS nodes (
@@ -42,6 +47,7 @@ CREATE TABLE IF NOT EXISTS edges (
     weight   REAL NOT NULL DEFAULT 1.0,
     PRIMARY KEY (src, dst, relation)
 );
+CREATE INDEX IF NOT EXISTS idx_edges_relation_src ON edges(relation, src);
 
 CREATE TABLE IF NOT EXISTS levels (
     scale      INTEGER PRIMARY KEY,
@@ -147,8 +153,16 @@ class MeraGraph:
         self._lock = threading.RLock()
         if self.db_path != ":memory:":
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.db_path, isolation_level=None, check_same_thread=False)
+        self._conn = sqlite3.connect(
+            self.db_path,
+            isolation_level=None,
+            check_same_thread=False,
+            timeout=30.0,
+        )
         with self._lock:
+            if self.db_path != ":memory:":
+                self._conn.execute("PRAGMA journal_mode=WAL;")
+            self._conn.execute("PRAGMA busy_timeout=30000;")
             self._conn.executescript(_SCHEMA)
         self._load_analogies()
 
@@ -199,6 +213,7 @@ class MeraGraph:
         weight: float = 1.0,
         signature: StructuralSignature | None = None,
         strategy: Mapping[str, Any] | None = None,
+        scope: SinkScope | Mapping[str, Any] | None = None,
     ) -> str:
         """Persist a node, stamping every L1/L2 node with a structural signature."""
         data = dict(payload)
@@ -218,14 +233,28 @@ class MeraGraph:
                 )
             data["structural_signature"] = structural.as_dict()
             data["decomposition_strategy"] = self._decomposition_strategy(data, strategy)
-        digest = self.sink.put(kind, data, scale=scale, parent_hash=parent_hash, eta_cog=eta_cog)
+        digest = self.sink.put(
+            kind,
+            data,
+            scale=scale,
+            parent_hash=parent_hash,
+            eta_cog=eta_cog,
+            scope=scope,
+        )
         encoded = canonical_json(data)
         with self._lock:
-            self._conn.execute(
-                "INSERT OR IGNORE INTO nodes (hash, scale, kind, payload, parent_hash, eta_cog, weight, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (digest, scale, kind, encoded, parent_hash, eta_cog, weight, time.time()),
-            )
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO nodes (hash, scale, kind, payload, parent_hash, eta_cog, weight, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (digest, scale, kind, encoded, parent_hash, eta_cog, weight, time.time()),
+                )
+                self._conn.execute("COMMIT")
+            except Exception:
+                with suppress(Exception):
+                    self._conn.execute("ROLLBACK")
+                raise
         if scale >= 1 and structural is not None:
             meta = dict(data.get("metadata") or {}) if isinstance(data.get("metadata"), Mapping) else {}
             meta.update(data["decomposition_strategy"])
@@ -300,18 +329,34 @@ class MeraGraph:
         return digest
 
     def best_analogy(
-        self, signature: StructuralSignature, min_similarity: float = 0.75
+        self,
+        signature: StructuralSignature,
+        min_similarity: float = 0.75,
+        *,
+        latest_only: bool = True,
     ) -> AnalogyMatch | None:
         """Recall the closest structural strategy learned in any repository."""
-        return self.analogies.best_match(signature, min_similarity=min_similarity)
+        excluded = self._retired_pattern_ids() if latest_only else frozenset()
+        return self.analogies.best_match(
+            signature,
+            min_similarity=min_similarity,
+            exclude_pattern_ids=excluded,
+        )
 
     def recall_decomposition_strategy(
         self,
         signature: StructuralSignature,
         min_similarity: float = 0.75,
+        *,
+        latest_only: bool = True,
     ) -> dict[str, Any] | None:
         """Zero-shot recall of module cuts and test-locking order at cosine >= .75."""
-        match = self.analogies.best_match(signature, min_similarity=min_similarity)
+        excluded = self._retired_pattern_ids() if latest_only else frozenset()
+        match = self.analogies.best_match(
+            signature,
+            min_similarity=min_similarity,
+            exclude_pattern_ids=excluded,
+        )
         if match is None:
             return None
         metadata = dict(match.metadata)
@@ -328,10 +373,71 @@ class MeraGraph:
 
     def link(self, src: str, dst: str, relation: str, weight: float = 1.0) -> None:
         with self._lock:
-            self._conn.execute(
-                "INSERT OR IGNORE INTO edges (src, dst, relation, weight) VALUES (?, ?, ?, ?)",
-                (src, dst, relation, float(weight)),
-            )
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO edges (src, dst, relation, weight) VALUES (?, ?, ?, ?)",
+                    (src, dst, relation, float(weight)),
+                )
+                self._conn.execute("COMMIT")
+            except Exception:
+                with suppress(Exception):
+                    self._conn.execute("ROLLBACK")
+                raise
+
+    def supersede(self, old_hash: str, new_hash: str, *, weight: float = 1.0) -> None:
+        """Retire ``old_hash`` without deleting it: append a SUPERSEDED edge."""
+        self.link(old_hash, new_hash, SUPERSEDED, weight)
+
+    def mark_merged(self, merged_hash: str, winner_hash: str, *, weight: float = 1.0) -> None:
+        """Record that a losing branch was merged into the winner, append-only."""
+        self.link(merged_hash, winner_hash, MERGED, weight)
+
+    def record_race_lineage(self, winner_hash: str, loser_hashes: Sequence[str]) -> None:
+        """Retire every losing race branch while keeping full edge audit history."""
+        for loser in dict.fromkeys(str(item) for item in loser_hashes if str(item) != str(winner_hash)):
+            self.supersede(loser, winner_hash)
+            self.mark_merged(loser, winner_hash)
+
+    def edges(self, *, relation: str | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT src, dst, relation, weight FROM edges WHERE 1=1"
+        params: list[Any] = []
+        if relation is not None:
+            sql += " AND relation = ?"
+            params.append(str(relation))
+        sql += " ORDER BY src ASC, dst ASC, relation ASC"
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [
+            {
+                "src": str(row[0]),
+                "dst": str(row[1]),
+                "relation": str(row[2]),
+                "weight": float(row[3]),
+            }
+            for row in rows
+        ]
+
+    def _retired_hashes(self) -> set[str]:
+        placeholders = ",".join("?" for _ in _LINEAGE_RETIRE_RELATIONS)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT DISTINCT src FROM edges WHERE relation IN ({placeholders})",
+                _LINEAGE_RETIRE_RELATIONS,
+            ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    def _retired_pattern_ids(self) -> set[str]:
+        retired = self._retired_hashes()
+        if not retired:
+            return set()
+        excluded: set[str] = set(retired)
+        for pattern_id, _signature, _hint, meta in self.analogies.patterns:
+            bare = str(pattern_id).removeprefix("node:")
+            node_hash = str(meta.get("node_hash", ""))
+            if bare in retired or node_hash in retired:
+                excluded.add(str(pattern_id))
+        return excluded
 
     def coarse_grain(
         self,
@@ -342,8 +448,13 @@ class MeraGraph:
         chi_max: int = 8,
         tau: float = 0.15,
         kinds: Sequence[str] = ("uv_state",),
+        latest_only: bool = True,
     ) -> CoarseGrainReport:
         records = self.sink.records(kinds=kinds, scale=scale, min_eta=min_eta, limit=limit)
+        if latest_only:
+            retired = self._retired_hashes()
+            if retired:
+                records = [record for record in records if record.hash not in retired]
         if len(records) < 2:
             return CoarseGrainReport(
                 scale=scale,
@@ -507,7 +618,13 @@ class MeraGraph:
             guidance=guidance_count,
         )
 
-    def nodes(self, scale: int | None = None, kind: str | None = None) -> list[dict[str, Any]]:
+    def nodes(
+        self,
+        scale: int | None = None,
+        kind: str | None = None,
+        *,
+        latest_only: bool = True,
+    ) -> list[dict[str, Any]]:
         sql = (
             "SELECT hash, scale, kind, payload, parent_hash, eta_cog, weight, created_at FROM nodes WHERE 1=1"
         )
@@ -518,6 +635,10 @@ class MeraGraph:
         if kind is not None:
             sql += " AND kind = ?"
             params.append(kind)
+        if latest_only:
+            placeholders = ",".join("?" for _ in _LINEAGE_RETIRE_RELATIONS)
+            sql += f" AND hash NOT IN (SELECT src FROM edges WHERE relation IN ({placeholders}))"
+            params.extend(_LINEAGE_RETIRE_RELATIONS)
         sql += " ORDER BY scale ASC, created_at ASC, hash ASC"
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
@@ -535,22 +656,29 @@ class MeraGraph:
             for row in rows
         ]
 
-    def rules(self, *, scale: int | None = None, min_support: int = 1) -> list[dict[str, Any]]:
+    def rules(
+        self,
+        *,
+        scale: int | None = None,
+        min_support: int = 1,
+        latest_only: bool = True,
+    ) -> list[dict[str, Any]]:
         return [
             node
-            for node in self.nodes(scale=scale, kind="rule")
+            for node in self.nodes(scale=scale, kind="rule", latest_only=latest_only)
             if int(node["payload"].get("support", 0)) >= min_support
         ]
 
-    def members(self, rule_hash: str) -> list[str]:
-        return self.sources(rule_hash, "absorbed_by")
+    def members(self, rule_hash: str, *, latest_only: bool = True) -> list[str]:
+        return self.sources(rule_hash, "absorbed_by", latest_only=latest_only)
 
-    def sources(self, digest: str, relation: str = "compiled_from") -> list[str]:
+    def sources(self, digest: str, relation: str = "compiled_from", *, latest_only: bool = True) -> list[str]:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT src FROM edges WHERE dst = ? AND relation = ? ORDER BY src", (digest, relation)
             ).fetchall()
-        return [row[0] for row in rows]
+        retired = self._retired_hashes() if latest_only else set()
+        return [str(row[0]) for row in rows if str(row[0]) not in retired]
 
     def levels(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -570,8 +698,8 @@ class MeraGraph:
             for row in rows
         ]
 
-    def reflex_candidates(self, min_support: int = 2) -> list[dict[str, Any]]:
-        return self.rules(min_support=min_support)
+    def reflex_candidates(self, min_support: int = 2, *, latest_only: bool = True) -> list[dict[str, Any]]:
+        return self.rules(min_support=min_support, latest_only=latest_only)
 
     def close(self) -> None:
         with self._lock:

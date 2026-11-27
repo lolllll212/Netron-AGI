@@ -3,21 +3,22 @@
 The benchmark-gated cleanup is a source-layout change only. Public import paths,
 class identities, deterministic arithmetic, gate semantics, sink records, and
 offline A/B outputs are unchanged. In particular, the following three
-foundations were **documented, not rewritten**.
+foundations were initially documented, not rewritten. Upgrade 2 extends only
+the sink boundary as described below.
 
-## `core/cold_sink.py` — append-only evidence, not entity-scoped storage
+## `core/cold_sink.py` — append-only evidence with scoped WAL commits
 
-`ColdSink` is a content-addressed SQLite archive. A record's hash is computed
-from its content only; first-write metadata lives in the `state_commits` side
-table, and `states_no_update` / `states_no_delete` triggers enforce append-only
-behaviour. `commits()` exposes metadata history without mutating a state row.
+Upgrade 2 adds an additive v2-to-v3 migration with user, agent, run and branch
+scope on states and commit observations. Content hashes retain the v2 algorithm;
+identical content deduplicates while each scoped commit remains in history.
+Append-only state triggers remain enforced. Scoped recall selects observations
+within the requested scope. Scope is a retrieval filter, not an authorization boundary.
 
-The sink deliberately has **no entity or tenant scoping**. Benchmark fixture
-identity, task labels, orchestrator names, and run indices live in payloads and
-sink metadata inside the existing schema. No migration, foreign key, or new
-scoping column was introduced by the A/B harness or this cleanup. Reflex
-pre-state hashes and exact-gate expectations continue to be the replay boundary;
-only gate-verified edits become `applied_edit` evidence.
+File-backed sinks use SQLite WAL, busy timeouts and `BEGIN IMMEDIATE` write
+transactions to avoid deferred read-to-write snapshot upgrades. Optimistic branch
+leases expire or become PRUNED; a partial unique index allows only one COMMITTED
+winner per run and parent hash. MeraGraph records append-only SUPERSEDED/MERGED
+lineage; latest-only retrieval excludes retired race candidates.
 
 ## `core/coupling.py` — pure-Python AST incidence, not a semantic model
 

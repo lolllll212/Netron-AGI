@@ -32,9 +32,15 @@ class OfflineFixtureRouter:
     name = "offline_fixture_v1"
     offline = True
 
-    def __init__(self, fixtures: Sequence[BugFixture] | None = None) -> None:
+    def __init__(
+        self,
+        fixtures: Sequence[BugFixture] | None = None,
+        *,
+        max_tokens: int | None = None,
+    ) -> None:
         selected = tuple(fixtures or builtin_fixtures())
         self._fixtures = {fixture.id: fixture for fixture in selected}
+        self.max_tokens = None if max_tokens is None else max(0, int(max_tokens))
 
     def propose(self, request: PatchRequest) -> PatchResponse:
         fixture = self._fixtures.get(request.fixture_id)
@@ -48,10 +54,25 @@ class OfflineFixtureRouter:
             index = min(max(1, request.attempt) - 1, len(fixture.candidates) - 1)
             candidate = fixture.candidates[index]
         edits = validated_edits(candidate.edits, request.allowed_paths)
-        prompt_chars = sum(len(message["content"]) for message in request.messages())
+        messages = request.messages()
+        prompt_chars = sum(len(message["content"]) for message in messages)
         completion_chars = sum(len(edit.path) + len(edit.content) for edit in edits)
         prompt_tokens = max(1, prompt_chars // 4)
         completion_tokens = max(1, completion_chars // 4)
+        uncapped_tokens = prompt_tokens + completion_tokens
+        raw: dict[str, Any] = {
+            "candidate": candidate.name,
+            "constraints_used": list(constraints),
+            "probe_guided": probe_guided,
+            "offline": True,
+        }
+        if self.max_tokens is not None:
+            cap = self.max_tokens
+            raw["token_cap"] = cap
+            raw["uncapped_tokens"] = uncapped_tokens
+            if uncapped_tokens > cap:
+                prompt_tokens = min(prompt_tokens, cap // 2)
+                completion_tokens = max(0, cap - prompt_tokens)
         latency_ms = round(1.0 + 0.01 * prompt_tokens + 0.02 * completion_tokens, 3)
         rationale = candidate.rationale
         if probe_guided:
@@ -62,12 +83,7 @@ class OfflineFixtureRouter:
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             latency_ms=latency_ms,
-            raw={
-                "candidate": candidate.name,
-                "constraints_used": list(constraints),
-                "probe_guided": probe_guided,
-                "offline": True,
-            },
+            raw=raw,
         )
 
 

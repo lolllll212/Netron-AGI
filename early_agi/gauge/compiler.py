@@ -174,6 +174,18 @@ class GaugeCompiler:
                     span=stmt.span,
                 )
             ]
+        if isinstance(stmt, g.RaceStmt):
+            return [
+                Instruction(
+                    "RACE_BRANCHES",
+                    {
+                        "branches": list(stmt.branches),
+                        "gates": list(stmt.gates),
+                        "winner": stmt.winner,
+                    },
+                    span=stmt.span,
+                )
+            ]
         if isinstance(stmt, g.CollapseStmt):
             return [
                 Instruction(

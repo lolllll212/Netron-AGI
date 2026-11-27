@@ -14,6 +14,7 @@ from typing import Any
 
 from ..backends import get_backend
 from ..config import Settings
+from ..core.branch_race import RaceConfig
 from ..core.cold_sink import ColdSink
 from ..core.governor import Directive
 from ..core.kernel import EarlyAGIKernel
@@ -149,8 +150,10 @@ class GaugeVM:
         backend: Any | None = None,
         router: Any | None = None,
         synthesizer: Any | None = None,
+        race_config: RaceConfig | None = None,
     ) -> None:
         self.root = Path(root).resolve()
+        self.race_config = race_config
         self.settings = settings or Settings.from_env()
         validate = getattr(self.settings, "validate", None)
         if callable(validate):

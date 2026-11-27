@@ -17,6 +17,7 @@ from .instruction_parts import setup as _setup
 from .instruction_parts.expressions import _ExpressionOps
 from .instruction_parts.governance import _GovernanceOps
 from .instruction_parts.plasticity import _PlasticityOps
+from .instruction_parts.race import _RaceOps
 from .instruction_parts.setup import _SetupOps
 
 __all__ = ["GaugeOpcodeRunner"]
@@ -48,5 +49,5 @@ _append_distilled_constraints = _helpers._append_distilled_constraints
 _constraint_view = _helpers._constraint_view
 
 
-class GaugeOpcodeRunner(_SetupOps, _GovernanceOps, _PlasticityOps, _ExpressionOps):
+class GaugeOpcodeRunner(_SetupOps, _GovernanceOps, _PlasticityOps, _RaceOps, _ExpressionOps):
     """Execute one bytecode instruction against the VM's focused modules."""

@@ -302,3 +302,21 @@ without re-running a model.
   `unverifiable`, never a fake pass; missing THRML never becomes a hard import.
 
 See `SECURITY.md` for process containment limits.
+
+## Counterfactual branch racing
+
+Inside a `volume_law` or `frustration` handler:
+
+```gauge
+race [module_cut, dependency_cut] under [syntax_valid, tests_passing] -> winner
+```
+
+Branches must be 2–4 distinct declared reversible transforms or read-only extern
+ops; mutating operations are rejected. Gates must be declared and the winner
+variable fresh. Compilation emits `RACE_BRANCHES`. Runtime requires a due trap
+and an explicit offline `GaugeVM(race_config=RaceConfig(...))`; without fixture
+configuration it records a skip. The winner variable receives the archived winner
+hash. Branch names select offline fixture strategies, not arbitrary extern-op
+execution. Only a gate-green highest-eta candidate crystallises; losing evidence
+and its SUPERSEDED/MERGED lineage remain append-only. The packaged default
+benchmark program does not opt into racing.

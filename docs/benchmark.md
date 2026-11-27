@@ -103,9 +103,10 @@ share one implementation boundary in `core/adaptation/`; `core/plasticity.py`
 and `core/adaptability.py` are backwards-compatible façades. `ThermodynamicGovernor`
 still consumes the same live state, `netron_plastic.gauge` and `GaugeVM` still own
 orchestration, and the benchmark only records their outputs into A/B curves.
-It also leaves the `ColdSink` schema, pure-Python AST coupling scanner, and THRML
-adapter seam unchanged: fixture/task scoping lives in sink payloads, not a new
-schema migration. See [architecture-boundaries.md](architecture-boundaries.md)
+Upgrade 2 adds scoped WAL commits and branch leases to `ColdSink`, while keeping
+its content hashes and default offline A/B output stable. The pure-Python AST
+coupling scanner and THRML adapter remain unchanged.
+See [architecture-boundaries.md](architecture-boundaries.md)
 for those three low-level contracts. The package is split into small modules
 (`contracts.py`, `fixtures.py`, `routers.py`, `gates.py`, `records.py`,
 `metrics.py`, `runner.py`, `cli.py`) to avoid another monolithic control file;
@@ -145,3 +146,23 @@ required to claim model-quality gains. Token counts are deterministic estimates
 offline and provider-reported on live runs; there is still no currency budget.
 `pytest` subprocesses execute fixture code inside a temporary workspace and
 carry the same trust boundary described in `SECURITY.md`.
+
+## Offline counterfactual race arm (Upgrade 2)
+
+```sh
+python -m early_agi.bench --race --tasks 4 --k 4 --timeout 30 --compact
+```
+
+The opt-in third arm races 2–4 isolated sandboxes, gates every candidate and
+commits the green candidate with highest eta_cog. Token count, latency and branch
+order break ties. Losers remain immutable pruned evidence with MeraGraph lineage.
+The default two-arm program is unchanged. `--seed`, `--max-tokens-per-branch`
+and `--race-workers` configure the race. File-backed runs use spawned processes;
+in-memory sinks use threads. Workers receive picklable fixture/config data.
+
+`--endpoint mock://local --model race-fast` exercises a mocked OpenAI-compatible
+seam only: all race runs remain offline with zero network calls. Live OpenAI
+routing cannot be combined with `--race`. Reports include winner eta, branch
+tokens, pruned counts, lineage, executor and sandbox modes. Parallel racing can
+spend more total tokens than serial baseline; a green report is not a claim of
+token savings. Use at least four tasks to exercise repeat/reflex report thresholds.

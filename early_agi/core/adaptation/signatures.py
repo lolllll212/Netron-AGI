@@ -165,14 +165,23 @@ class AnalogicalMatcher:
                 return
         self._patterns.append((pattern_id, signature, strategy_hint, payload))
 
-    def best_match(self, signature: StructuralSignature, min_similarity: float = 0.72) -> AnalogyMatch | None:
+    def best_match(
+        self,
+        signature: StructuralSignature,
+        min_similarity: float = 0.72,
+        *,
+        exclude_pattern_ids: set[str] | frozenset[str] | None = None,
+    ) -> AnalogyMatch | None:
         query = signature.to_vector()
         q_norm = float(np.linalg.norm(query))
         if q_norm <= 1e-12 or not self._patterns:
             return None
 
+        excluded = set(exclude_pattern_ids or ())
         best: AnalogyMatch | None = None
         for pattern_id, candidate, hint, meta in self._patterns:
+            if pattern_id in excluded:
+                continue
             vector = candidate.to_vector()
             v_norm = float(np.linalg.norm(vector))
             if v_norm <= 1e-12:

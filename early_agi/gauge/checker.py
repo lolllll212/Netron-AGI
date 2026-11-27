@@ -232,6 +232,7 @@ def _check_transform(
                 g.EvolveStmt,
                 g.TrapHandler,
                 g.ProbeStmt,
+                g.RaceStmt,
             ),
         ):
             issues.append(
@@ -308,6 +309,65 @@ def _check_analogy_condition(cond: g.Expr, issues: list[CheckIssue]) -> None:
         issues.append(CheckIssue("warning", "analogy condition should reference 'similarity'", cond.span))
 
 
+def _check_race(
+    stmt: g.RaceStmt,
+    *,
+    manifolds: dict[str, g.ManifoldDecl],
+    gates: dict[str, g.GateDecl],
+    ops: dict[str, g.OpDecl],
+    transforms: dict[str, g.TransformDecl],
+    issues: list[CheckIssue],
+) -> None:
+    """Race branches must be reversible/read-only and scoped to declared names."""
+    branches = [str(item) for item in stmt.branches]
+    race_gates = [str(item) for item in stmt.gates]
+    if not 2 <= len(branches) <= 4:
+        issues.append(CheckIssue("error", "race requires 2 to 4 distinct branch names", stmt.span))
+    if len(set(branches)) != len(branches):
+        issues.append(CheckIssue("error", "race branch names must be distinct", stmt.span))
+    if not race_gates:
+        issues.append(CheckIssue("error", "race requires at least one gate under []", stmt.span))
+    for gate_name in race_gates:
+        if gate_name not in gates:
+            issues.append(CheckIssue("error", f"race references unknown gate {gate_name!r}", stmt.span))
+    for branch in branches:
+        op = ops.get(branch)
+        transform = transforms.get(branch)
+        if op is None and transform is None:
+            issues.append(
+                CheckIssue(
+                    "error",
+                    f"race branch {branch!r} must name a reversible transform or read-only extern op",
+                    stmt.span,
+                )
+            )
+        elif op is not None and _mutating_footprint(op.deforms):
+            issues.append(
+                CheckIssue(
+                    "error",
+                    f"race branch {branch!r} is not reversible: extern op has a mutating footprint",
+                    stmt.span,
+                )
+            )
+        elif branch in manifolds:
+            issues.append(
+                CheckIssue(
+                    "error",
+                    f"race branch {branch!r} shadows global manifold {branch!r}",
+                    stmt.span,
+                )
+            )
+    reserved = set(branches) | set(manifolds) | set(gates) | set(ops) | set(transforms)
+    if stmt.winner in reserved:
+        issues.append(
+            CheckIssue(
+                "error",
+                f"race winner {stmt.winner!r} must be a fresh scoped variable",
+                stmt.span,
+            )
+        )
+
+
 def _check_govern(
     decl: g.GovernDecl,
     manifolds: dict[str, g.ManifoldDecl],
@@ -364,6 +424,15 @@ def _check_govern(
                 issues.append(
                     CheckIssue("warning", f"unusual synthesis metric {stmt.target_metric!r}", stmt.span)
                 )
+        elif isinstance(stmt, g.RaceStmt):
+            _check_race(
+                stmt,
+                manifolds=manifolds,
+                gates=gates,
+                ops=ops,
+                transforms=transforms,
+                issues=issues,
+            )
         elif isinstance(stmt, g.RecallStmt):
             if stmt.kind == "analogy":
                 _check_analogy_condition(stmt.condition, issues)

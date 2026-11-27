@@ -15,7 +15,7 @@ from typing import Any
 
 from .contracts import FileEdit, is_safe_relative, validated_edits
 
-__all__ = ["BugFixture", "PatchCandidate", "builtin_fixtures"]
+__all__ = ["BugFixture", "PatchCandidate", "builtin_fixtures", "tangled_fixtures"]
 
 
 def _py(text: str) -> str:
@@ -458,3 +458,319 @@ def builtin_fixtures() -> tuple[BugFixture, ...]:
         probe_hint="assert duplicate jobs are processed once",
     )
     return (cart, limiter, worker)
+
+
+_INVOICE_TAX_BUG = _py(
+    """
+    def tax(amount, rate):
+        return amount * rate
+    """
+)
+
+_INVOICE_TAX_FIX = _py(
+    """
+    def tax(amount, rate):
+        return amount * (rate / 100.0)
+    """
+)
+
+_INVOICE_LEDGER_BUG = _py(
+    """
+    def subtotal(items):
+        total = 1
+        for item in items:
+            total += item["price"] * item["qty"]
+        return total
+    """
+)
+
+_INVOICE_LEDGER_FIX = _py(
+    """
+    def subtotal(items):
+        total = 0
+        for item in items:
+            total += item["price"] * item["qty"]
+        return total
+    """
+)
+
+_INVOICE_PIPELINE_BUG = _py(
+    """
+    from .ledger import subtotal
+    from .tax import tax
+
+
+    def charge(items, *, rate=10.0):
+        base = subtotal(items)
+        return base + tax(base, rate) + 1
+    """
+)
+
+_INVOICE_PIPELINE_FIX = _py(
+    """
+    from .ledger import subtotal
+    from .tax import tax
+
+
+    def charge(items, *, rate=10.0):
+        base = subtotal(items)
+        return base + tax(base, rate)
+    """
+)
+
+_INVOICE_PIPELINE_REPLAY = _py(
+    """
+    # Inverse replay basis: ledger then tax then pipeline, with no hidden fee.
+    from .ledger import subtotal
+    from .tax import tax
+
+
+    def charge(items, *, rate=10.0):
+        base = subtotal(items)
+        return base + tax(base, rate)
+    """
+)
+
+_INVOICE_TEST = _py(
+    """
+    from billing.ledger import subtotal
+    from billing.pipeline import charge
+    from billing.tax import tax
+
+
+    def test_invoice_is_ledger_plus_percentage_tax():
+        items = [{"price": 10, "qty": 2}, {"price": 5, "qty": 4}]
+        assert subtotal(items) == 40
+        assert tax(100, 10) == 10
+        assert round(charge(items, rate=10), 6) == 44
+    """
+)
+
+_SCHEDULER_CLOCK_BUG = _py(
+    """
+    class Clock:
+        def __init__(self, start=0):
+            self.value = start
+
+        def now(self):
+            return self.value
+
+        def advance(self, seconds):
+            self.value -= seconds
+    """
+)
+
+_SCHEDULER_CLOCK_FIX = _py(
+    """
+    class Clock:
+        def __init__(self, start=0):
+            self.value = start
+
+        def now(self):
+            return self.value
+
+        def advance(self, seconds):
+            self.value += seconds
+    """
+)
+
+_SCHEDULER_QUEUE_BUG = _py(
+    """
+    class Queue:
+        def __init__(self):
+            self.seen = set()
+
+        def seen_before(self, key):
+            return key not in self.seen
+
+        def remember(self, key):
+            self.seen.add(key)
+    """
+)
+
+_SCHEDULER_QUEUE_FIX = _py(
+    """
+    class Queue:
+        def __init__(self):
+            self.seen = set()
+
+        def seen_before(self, key):
+            return key in self.seen
+
+        def remember(self, key):
+            self.seen.add(key)
+    """
+)
+
+_SCHEDULER_RUNNER_BUG = _py(
+    """
+    from .clock import Clock
+    from .queue import Queue
+
+
+    def run(jobs, clock=None):
+        clock = clock or Clock()
+        queue = Queue()
+        output = []
+        for job in jobs:
+            if not queue.seen_before(job["key"]):
+                output.append(job["value"] * 2)
+            clock.advance(1)
+        return output, clock.now()
+    """
+)
+
+_SCHEDULER_RUNNER_FIX = _py(
+    """
+    from .clock import Clock
+    from .queue import Queue
+
+
+    def run(jobs, clock=None):
+        clock = clock or Clock()
+        queue = Queue()
+        output = []
+        for job in jobs:
+            if not queue.seen_before(job["key"]):
+                output.append(job["value"] * 2)
+                queue.remember(job["key"])
+            clock.advance(1)
+        return output, clock.now()
+    """
+)
+
+_SCHEDULER_RUNNER_REPLAY = _py(
+    """
+    # Inverse replay basis: lock clock, queue, and runner in test order.
+    from .clock import Clock
+    from .queue import Queue
+
+
+    def run(jobs, clock=None):
+        clock = clock or Clock()
+        queue = Queue()
+        output = []
+        for job in jobs:
+            if not queue.seen_before(job["key"]):
+                output.append(job["value"] * 2)
+                queue.remember(job["key"])
+            clock.advance(1)
+        return output, clock.now()
+    """
+)
+
+_SCHEDULER_TEST = _py(
+    """
+    from scheduler.runner import run
+
+
+    def test_duplicates_are_processed_once_with_forward_clock():
+        jobs = [{"key": "alpha", "value": 3}, {"key": "alpha", "value": 4}]
+        output, now = run(jobs)
+        assert output == [6]
+        assert now == 2
+    """
+)
+
+
+def tangled_fixtures() -> tuple[BugFixture, ...]:
+    """Return deeper cross-module fixtures for the branch-racing A/B arm."""
+    invoice = BugFixture(
+        id="invoice_pipeline",
+        task="Repair a tangled ledger, percentage-tax, and pipeline fee calculation",
+        files=_fixture_files(
+            package="billing",
+            sources={
+                "billing/tax.py": _INVOICE_TAX_BUG,
+                "billing/ledger.py": _INVOICE_LEDGER_BUG,
+                "billing/pipeline.py": _INVOICE_PIPELINE_BUG,
+            },
+            test_name="test_invoice.py",
+            test_source=_INVOICE_TEST,
+        ),
+        candidates=(
+            PatchCandidate(
+                name="pipeline_only",
+                edits=(FileEdit("billing/pipeline.py", _INVOICE_PIPELINE_FIX),),
+                rationale="remove the hidden pipeline fee only",
+            ),
+            PatchCandidate(
+                name="ledger_and_pipeline",
+                edits=(
+                    FileEdit("billing/ledger.py", _INVOICE_LEDGER_FIX),
+                    FileEdit("billing/pipeline.py", _INVOICE_PIPELINE_FIX),
+                ),
+                rationale="cut ledger and pipeline but leave tax unscaled",
+            ),
+            PatchCandidate(
+                name="full_dependency_cut",
+                edits=(
+                    FileEdit("billing/tax.py", _INVOICE_TAX_FIX),
+                    FileEdit("billing/ledger.py", _INVOICE_LEDGER_FIX),
+                    FileEdit("billing/pipeline.py", _INVOICE_PIPELINE_FIX),
+                ),
+                rationale="repair all three coupled modules",
+            ),
+            PatchCandidate(
+                name="full_inverse_replay",
+                edits=(
+                    FileEdit("billing/tax.py", _INVOICE_TAX_FIX),
+                    FileEdit("billing/ledger.py", _INVOICE_LEDGER_FIX),
+                    FileEdit("billing/pipeline.py", _INVOICE_PIPELINE_REPLAY),
+                ),
+                rationale="repair all modules through a higher-cost inverse replay basis",
+            ),
+        ),
+        probe_hint="assert subtotal(items) == 40 and charge(items, rate=10) == 44",
+        fix_index=2,
+    )
+    scheduler = BugFixture(
+        id="event_scheduler",
+        task="Repair clock direction, seen-before logic, and runner idempotency together",
+        files=_fixture_files(
+            package="scheduler",
+            sources={
+                "scheduler/clock.py": _SCHEDULER_CLOCK_BUG,
+                "scheduler/queue.py": _SCHEDULER_QUEUE_BUG,
+                "scheduler/runner.py": _SCHEDULER_RUNNER_BUG,
+            },
+            test_name="test_scheduler.py",
+            test_source=_SCHEDULER_TEST,
+        ),
+        candidates=(
+            PatchCandidate(
+                name="clock_only",
+                edits=(FileEdit("scheduler/clock.py", _SCHEDULER_CLOCK_FIX),),
+                rationale="advance time forward only",
+            ),
+            PatchCandidate(
+                name="clock_and_queue",
+                edits=(
+                    FileEdit("scheduler/clock.py", _SCHEDULER_CLOCK_FIX),
+                    FileEdit("scheduler/queue.py", _SCHEDULER_QUEUE_FIX),
+                ),
+                rationale="lock clock and queue but leave the runner unguarded",
+            ),
+            PatchCandidate(
+                name="full_test_locking_order",
+                edits=(
+                    FileEdit("scheduler/clock.py", _SCHEDULER_CLOCK_FIX),
+                    FileEdit("scheduler/queue.py", _SCHEDULER_QUEUE_FIX),
+                    FileEdit("scheduler/runner.py", _SCHEDULER_RUNNER_FIX),
+                ),
+                rationale="repair clock, queue, and runner in test-locking order",
+            ),
+            PatchCandidate(
+                name="full_inverse_replay",
+                edits=(
+                    FileEdit("scheduler/clock.py", _SCHEDULER_CLOCK_FIX),
+                    FileEdit("scheduler/queue.py", _SCHEDULER_QUEUE_FIX),
+                    FileEdit("scheduler/runner.py", _SCHEDULER_RUNNER_REPLAY),
+                ),
+                rationale="repair all modules through a higher-cost inverse replay basis",
+            ),
+        ),
+        probe_hint="assert duplicate jobs are processed once and clock.now() == 2",
+        fix_index=2,
+    )
+    return (invoice, scheduler)
