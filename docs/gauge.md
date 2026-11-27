@@ -23,17 +23,20 @@ a `synthesize op` trap is triggered. The model is never the outer loop.
    `collapse`, `drop`, and `synthesize` are rejected inside a reversible body.
 3. **Bytecode IR and VM** — `compiler.py` lowers a checked AST into compact
    instructions. `vm.py` is strictly the instruction dispatcher: `instructions.py`
-   holds opcode handlers, `state.py` holds workspace/manifold views, `builtins.py`
-   holds the expression vocabulary, `traps.py` owns trap evaluation and inverse
-   recovery, and `results.py` holds the run report. Together they call the real
-   kernel, SQLite cold sink, relaxation backend, dark-state verifiers, operator
-   registry, governor, and MERA graph.
-4. **Replay-gated synthesis** — `synthesizer.py` pulls the last N high-drag
-   `ColdSink` episodes, benchmarks a candidate in an isolated `python -I`
-   subprocess against replayed states, requires strictly positive `eta_cog`
-   improvement on every case and green `DarkStateGate` results, then registers
-   the operator. Repeated gate-green `extern op` chains are fused into
-   deterministic reflexes through `memory/reflex.py`.
+   is the public opcode façade over `instruction_parts/` (setup, governance,
+   plasticity, and expression handlers), `state.py` holds workspace/manifold
+   views, `builtins.py` holds the expression vocabulary, `traps.py` owns trap
+   evaluation and inverse recovery, and `results.py` holds the run report.
+   Together they call the real kernel, SQLite cold sink, relaxation backend,
+   dark-state verifiers, operator registry, governor, and MERA graph.
+4. **Replay-gated synthesis** — `synthesizer.py` is the public façade over
+   `synthesis_parts/` (models, construction/promotion, replay benchmarking, and
+   hot-chain fusion). It pulls the last N high-drag `ColdSink` episodes,
+   benchmarks a candidate in an isolated `python -I` subprocess against replayed
+   states, requires strictly positive `eta_cog` improvement on every case and
+   green `DarkStateGate` results, then registers the operator. Repeated gate-green
+   `extern op` chains are fused into deterministic reflexes through
+   `memory/reflex.py`.
 
 ## Constructs
 
@@ -99,7 +102,10 @@ existing `volume_law`, `drag`, `frustration`, `recall sink`, synthesis, and
 | Module | Responsibility |
 | --- | --- |
 | `gauge/vm.py` | public API, run orchestration, and bytecode dispatch only |
-| `gauge/instructions.py` | opcode handlers and subsystem calls |
+| `gauge/instructions.py` | compatibility façade and composed `GaugeOpcodeRunner` |
+| `gauge/instruction_parts/` | setup, governance, plasticity, expression, and helper opcode groups |
+| `gauge/synthesizer.py` | compatibility façade, composed `Synthesizer`, and monkeypatch seam |
+| `gauge/synthesis_parts/` | replay cases/results, promotion, sandbox replay, and hot-chain fusion |
 | `gauge/state.py` | workspace scan, manifold views, variables, and inverse snapshots |
 | `gauge/builtins.py` | safe expression functions and the `GaugeGate` bridge |
 | `gauge/traps.py` | trap aliasing, `uncall`, recall, and LIFO frame rollback |

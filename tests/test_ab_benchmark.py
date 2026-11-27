@@ -161,8 +161,11 @@ def test_router_seam_builds_live_prompt_but_stays_disabled(
 
 
 def test_packaged_plastic_program_matches_verified_example() -> None:
-    packaged = files("early_agi.bench").joinpath("netron_plastic.gauge").read_text(encoding="utf-8")
-    example = (Path(__file__).parents[1] / "examples" / "netron_plastic.gauge").read_text(encoding="utf-8")
+    resource = files("early_agi.bench").joinpath("netron_plastic.gauge")
+    example_path = Path(__file__).parents[1] / "examples" / "netron_plastic.gauge"
+    packaged = resource.read_text(encoding="utf-8")
+    example = example_path.read_text(encoding="utf-8")
     assert packaged == example
+    assert resource.read_bytes() == example_path.read_bytes()
     assert "ast_check(p.files)" in packaged
     assert "pytest_run(p.targets)" in packaged

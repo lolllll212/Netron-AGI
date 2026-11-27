@@ -32,8 +32,9 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from ..core.adaptation.signatures import AnalogyMatch, StructuralSignature
+from ..core.adaptation.surprise import SynapticDecay
 from ..core.cold_sink import SinkRecord, canonical_json
-from ..core.plasticity import AnalogyMatch, StructuralSignature, SynapticDecay
 from ..operators.registry import OperatorSpec
 from .mera_graph import MeraGraph
 

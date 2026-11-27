@@ -7,10 +7,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from ..core.adaptability import AdaptationDirective, DirectivePool
+from ..core.adaptation.co_adaptation import AutonomyProfile
+from ..core.adaptation.directives import AdaptationDirective, DirectivePool
 from ..core.cold_sink import canonical_json
 from ..core.kernel import ShiftArtifact
-from ..core.plasticity import AutonomyProfile
 from .client import LLMUnavailable, OpenAICompatibleClient
 
 __all__ = [

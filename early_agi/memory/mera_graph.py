@@ -17,8 +17,8 @@ import numpy as np
 
 from ..backends.base import RelaxationBackend
 from ..backends.classical_svd import ClassicalSVDBackend
+from ..core.adaptation.signatures import AnalogicalMatcher, AnalogyMatch, StructuralSignature
 from ..core.cold_sink import ColdSink, SinkRecord, canonical_json
-from ..core.plasticity import AnalogicalMatcher, AnalogyMatch, StructuralSignature
 
 __all__ = ["CoarseGrainReport", "MeraGraph"]
 

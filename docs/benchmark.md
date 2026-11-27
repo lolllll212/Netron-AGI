@@ -98,15 +98,43 @@ task signature, exact pre-state hashes, and expected gates to match.
 ## Architectural boundaries
 
 This benchmark intentionally does not add another surprise/novelty controller.
-Surprise EMA, adaptive thresholds, and probe policy remain in
-`core/plasticity.py` / `core/governor.py`; `netron_plastic.gauge` and `GaugeVM`
-own the orchestration. The benchmark only records their outputs into A/B curves.
+Surprise EMA, adaptive thresholds, structural signatures, and probe policy now
+share one implementation boundary in `core/adaptation/`; `core/plasticity.py`
+and `core/adaptability.py` are backwards-compatible façades. `ThermodynamicGovernor`
+still consumes the same live state, `netron_plastic.gauge` and `GaugeVM` still own
+orchestration, and the benchmark only records their outputs into A/B curves.
 It also leaves the `ColdSink` schema, pure-Python AST coupling scanner, and THRML
 adapter seam unchanged: fixture/task scoping lives in sink payloads, not a new
-schema migration. The package is split into small modules (`contracts.py`,
-`fixtures.py`, `routers.py`, `gates.py`, `records.py`, `metrics.py`, `runner.py`,
-`cli.py`) to avoid another monolithic control file; the largest module remains
-well below the old 40 KB `vm.py` threshold.
+schema migration. See [architecture-boundaries.md](architecture-boundaries.md)
+for those three low-level contracts. The package is split into small modules
+(`contracts.py`, `fixtures.py`, `routers.py`, `gates.py`, `records.py`,
+`metrics.py`, `runner.py`, `cli.py`) to avoid another monolithic control file;
+the largest module remains well below the old 40 KB `vm.py` threshold.
+
+## Structural-cleanup parity
+
+The structural cleanup used this CLI as a zero-behaviour-change regression lock.
+A 10-task, `k=4`, offline baseline was captured before any refactor and is saved
+in `benchmarks/structural-cleanup/baseline-report.json`; the compact summary is
+`baseline-summary.json`. After decomposing the session, Gauge instruction,
+Gauge synthesis, kernel, and adaptation modules, the same command produced
+`after-refactor-report.json`, which is byte-for-report identical to the baseline.
+Both reports have `offline=true`, `network_calls=0`, and `summary.ok=true`.
+
+```bash
+python -m early_agi.bench --tasks 10 --k 4 --timeout 60 --compact \
+  --output /tmp/structural-cleanup-ab-after.json
+python benchmarks/structural-cleanup/check_parity.py \
+  /tmp/structural-cleanup-ab-after.json
+```
+
+Locked values include Netron/plain `eta_cog` arm means `0.3561` / `0.907019`,
+discovery `eta_cog` `0.337667` / `0.906125`, cumulative `success@k` `[1,1,1,1]`
+/ `[0,1,1,1]`, arm rollbacks `0` / `10`, repeat-task rollbacks `[0]*7` / `[1]*7`,
+and repeat-token speedup `7980.0` with `7` reflex hits. `parity.json` records
+these values explicitly. The checker rejects any full-report drift, renamed
+curve, changed `eta_cog`, changed `success@k`, changed rollback count, or changed
+repeat-task reflex speedup.
 
 ## Limitations
 

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from .plasticity import AdaptiveThresholds, HomeostaticRegulator
+from .adaptation.surprise import AdaptiveThresholds, HomeostaticRegulator
 
 if TYPE_CHECKING:
     from .entropy_sensor import EntanglementReport

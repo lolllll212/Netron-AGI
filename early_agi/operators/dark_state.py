@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..core.adaptability import distilled_constraint
+from ..core.adaptation.constraints import distilled_constraint
 
 __all__ = [
     "DarkStateGate",

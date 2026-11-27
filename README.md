@@ -28,26 +28,35 @@ is opt-in.
 | 3 | Qualified call/import coupling scanner with explicit truncation reporting | working (`core/coupling.py`) |
 | 3 | MERA L0→L1 store using the backend `truncate`/`left_basis` contract | working (`memory/mera_graph.py`) |
 | 3 | Task-aware reflex compilation: recurring verified edit → zero-LLM replay | working (`memory/reflex.py`) |
-| 5 | Homeostatic thresholds, structural analogy, active probes, graceful unlearning, user co-adaptation | working (`core/plasticity.py`) |
-| 1–3 | Three-pillar adaptability: TTA surprise/patience, continual stratified replay, meta-transfer directive pool | working (`core/adaptability.py`, `gauge/synthesizer.py`, `llm/router.py`, `session.py`) |
+| 5 | Homeostatic thresholds, structural analogy, active probes, graceful unlearning, user co-adaptation | working (`core/plasticity.py` façade, `core/adaptation/`) |
+| 1–3 | Three-pillar adaptability: TTA surprise/patience, continual stratified replay, meta-transfer directive pool | working (`core/adaptability.py` façade, `core/adaptation/`, `gauge/synthesizer.py`, `llm/router.py`, `session.py`) |
 | 4 | Three offline adaptation curves: discovery@k, zero-regression retention, cold-start eta_cog | working (`tests/test_adaptability_bench.py`) |
 | A/B | Real multi-file repair benchmark: offline/live router seam, discovery@k, zero-forgetting retention, repeat-task reflex speedup | working (`bench/`, `docs/benchmark.md`) |
 | 4 | **Gauge frontend**: lexer, spans, AST, parser, static checker, IR, compiler | working (`gauge/`, `examples/`, `docs/gauge.md`) |
 | 4 | **Hybrid Thermodynamic VM**: real sink/backend/governor/gates/registry | working (`gauge/vm.py`) |
-| 4 | **Validated operator synthesis**: offline default, stratified replay, positive `eta_cog` gain, no historical gate regression | working (`gauge/synthesizer.py`) |
+| 4 | **Validated operator synthesis**: offline default, stratified replay, positive `eta_cog` gain, no historical gate regression | working (`gauge/synthesizer.py` façade, `gauge/synthesis_parts/`) |
 
 ## Layout
 
 ```text
 early_agi/
 ├── core/
+│   ├── adaptation/         # one surprise/signature/policy/benchmark boundary
+│   │   ├── signatures.py   # canonical SVD encoder + compatibility data views
+│   │   ├── surprise.py     # shared surprise EMA, thresholds, and decay
+│   │   ├── co_adaptation.py# implicit-feedback autonomy profile
+│   │   ├── constraints.py  # compact gate-failure distillation
+│   │   ├── episodes.py     # stratified ColdSink episode sampling
+│   │   ├── directives.py   # SQLite-backed directive pool
+│   │   └── benchmarks.py   # exactly three offline adaptation curves
+│   ├── kernel_parts/       # shift validation + tick loop behind kernel.py
 │   ├── cold_sink.py        # hash-addressed SQLite reversible archive
 │   ├── entropy_sensor.py   # SVD spectral entropy & volume-law detector
 │   ├── governor.py         # adaptive eta_cog thermodynamic controller
-│   ├── plasticity.py       # homeostasis, analogy, decay, and user co-adaptation
-│   ├── adaptability.py     # distilled constraints, directive pool, local benchmark
+│   ├── plasticity.py       # public compatibility façade
+│   ├── adaptability.py     # public compatibility façade
 │   ├── coupling.py         # bipartite incidence matrix from imports + calls
-│   └── kernel.py           # tick loop, semantic shift verification, checkpoints
+│   └── kernel.py           # public compatibility façade + tick result types
 ├── gauge/
 │   ├── span.py             # exact source locations
 │   ├── ast.py              # span-tagged Gauge AST
@@ -57,13 +66,15 @@ early_agi/
 │   ├── expressions.py      # safe tri-state evaluator (no eval)
 │   ├── ir.py               # compact bytecode IR
 │   ├── compiler.py         # checked AST -> deterministic VM instructions
-│   ├── synthesizer.py      # replay-gated promotion + hot-chain fusion
+│   ├── synthesizer.py      # public synthesis façade + monkeypatch seam
+│   ├── synthesis_parts/    # models, promotion, replay, and hot-chain fusion
 │   ├── runtime.py          # manifolds, candidate views, inverse frames
 │   ├── errors.py           # shared runtime error
 │   ├── builtins.py         # safe expression functions and GaugeGate
 │   ├── state.py            # workspace/manifold views and inverse snapshots
 │   ├── traps.py            # trap aliasing, uncall, and rollback
-│   ├── instructions.py     # opcode handlers
+│   ├── instructions.py     # public composed opcode-runner façade
+│   ├── instruction_parts/  # setup, governance, plasticity, expression handlers
 │   ├── results.py          # structured run report
 │   ├── vm.py               # thin bytecode dispatcher / public API
 │   └── cli.py              # python -m early_agi.gauge / gauge console script
@@ -92,9 +103,12 @@ early_agi/
 │   ├── cli.py              # python -m early_agi.bench stress runner
 │   └── netron_plastic.gauge # packaged copy of the plastic Gauge program
 ├── config.py               # strict env + .env wiring and runtime builder
-└── session.py              # per-turn transactional loop over a real repository
+├── session.py              # public AgentSession façade
+└── session_parts/          # turn loop, learning, archives, and workspace helpers
 
+benchmarks/structural-cleanup/ # pre/post-refactor A/B parity lock
 examples/netron_solve.gauge  # canonical Gauge program
+docs/architecture-boundaries.md # ColdSink / coupling / THRML contracts
 docs/gauge.md                # language, VM, safety, and mapping documentation
 docs/benchmark.md            # offline/live A/B repair benchmark guide
 ```
@@ -259,19 +273,24 @@ match. Failed replays are restored and repeated misses retire it.
 **Gauge.** The language keeps policy and constraint graphs out of hardcoded
 Python loops. `.gauge` scripts compile to deterministic IR; `vm.py` is a thin
 dispatcher with focused modules for instructions, state, built-ins, traps, and
-results. See [docs/gauge.md](docs/gauge.md).
+results. `instructions.py` and `synthesizer.py` are compatibility façades over
+`instruction_parts/` and `synthesis_parts/`. See
+[docs/gauge.md](docs/gauge.md).
 
-**Plasticity and adaptability.** `core/plasticity.py` adds a NumPy-only
-homeostatic regulator, scale-invariant analogical matcher, synaptic decay with
-fast weights, and an implicit user co-adapter. `ThermodynamicGovernor` adapts
-`eta_min`, `eta_high`, `tau`, `chi_max`, novelty, exploration patience, and
-`should_probe_first` from predicted/verified surprise, analogy similarity, and
-risk. High surprise relaxes thresholds and grants exploration patience; low
-surprise tightens the crystallization envelope. `core/adaptability.py` adds
-minimal pytest/Z3 failure constraints, stratified ColdSink episode sampling,
-scale-invariant topology signatures, and a SQLite-backed pool of parameterized
-adaptation directives. `MeraGraph` stamps every L1/L2 node with a structural
-signature and recalls `module_cut` / test-locking order at cosine ≥ 0.75;
+**Plasticity and adaptability.** `core/plasticity.py` and
+`core/adaptability.py` are public compatibility façades over one
+`core/adaptation/` boundary: a NumPy-only homeostatic regulator, shared surprise
+EMA, one scale-invariant signature encoder, synaptic decay, implicit user
+co-adaptation, compact failure constraints, stratified ColdSink sampling, a
+SQLite-backed directive pool, and exactly three local benchmark curves. The
+runtime still sees `motif_ratios`; the adaptation view still sees `motifs`; both
+share the same encoder and no duplicate novelty tracker. `ThermodynamicGovernor`
+adapts `eta_min`, `eta_high`, `tau`, `chi_max`, novelty, exploration patience,
+and `should_probe_first` from predicted/verified surprise, analogy similarity,
+and risk. High surprise relaxes thresholds and grants exploration patience; low
+surprise tightens the crystallization envelope. `MeraGraph` stamps every L1/L2
+node with a structural signature and recalls `module_cut` / test-locking order
+at cosine ≥ 0.75;
 `ReflexLibrary` uses continuous confidence instead of a binary retired flag.
 `GaugeVM` emits `EPISTEMIC_PROBE` before mutating setup ops, and
 `OperatorRegistry` allows only READ/VERIFY operators under that directive.
@@ -292,8 +311,12 @@ with fixed thresholds. ColdSink schema, AST coupling, and THRML seams stay
 unchanged; benchmark scoping lives in temporary workspace payloads and sink
 metadata. The fast three-curve pytest smoke remains a synthetic unit check, and
 the CLI stress runner is the path for real multi-file discovery@k, sequential
-zero-forgetting, and repeat-task reflex measurements. See
-[docs/benchmark.md](docs/benchmark.md).
+zero-forgetting, and repeat-task reflex measurements. It is also the regression
+lock for the structural cleanup: `benchmarks/structural-cleanup/` stores the
+pre-refactor report, the identical post-refactor report, and a checker for
+`eta_cog`, `success@k`, rollbacks, and repeat-task reflex speedups. See
+[docs/benchmark.md](docs/benchmark.md) and
+[docs/architecture-boundaries.md](docs/architecture-boundaries.md).
 
 ## Limitations
 
