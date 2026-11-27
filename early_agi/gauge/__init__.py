@@ -8,7 +8,7 @@ tools and LLMs are invoked only by explicit operators or traps.
 
 from __future__ import annotations
 
-from .ast import Program, node_to_dict
+from .ast import ProbeStmt, Program, node_to_dict
 from .builtins import GaugeBuiltins, GaugeGate, SymbolResolver
 from .checker import (
     CheckedProgram,
@@ -54,6 +54,7 @@ __all__ = [
     "GaugeVM",
     "Instruction",
     "ManifoldState",
+    "ProbeStmt",
     "Program",
     "ProgramIR",
     "ReversibleTransform",

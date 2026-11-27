@@ -46,10 +46,14 @@ a `synthesize op` trap is triggered. The model is never the outer loop.
 | `reversible transform t(...) -> ... { ... }` | invertible coordinate re-encoding | `ReversibleTransform` + inverse stack |
 | `uncall t` | replay the inverse of the latest `t` | `TrapRunner` / inverse stack snapshot restore |
 | `govern eta_min = ..., chi_max = ... { ... }` | thermodynamic policy block | `ThermodynamicGovernor`, `EarlyAGIKernel` |
+| `plastic govern eta_min = ..., chi_max = ..., adaptation_rate = ... { ... }` | homeostatic policy block | `HomeostaticRegulator`, live `eta_min` / `eta_high` / `tau` / `chi_max` |
 | `evolve p under [g1, g2]` | measure, project, govern, tick | `ENT_MEASURE`, `GATE_PROJECT`, `GOVERN_CHECK`, `EVOLVE` |
 | `on volume_law(ent) { ... }` | trap for volume-law coupling | `TrapPolicy` / `TRAP_VOLUME_LAW` |
 | `on drag(eta) { ... }` | trap for rolling efficiency drag | `TrapPolicy` / `TRAP_DRAG` |
 | `on frustration { ... }` | trap for recall/stall | `TrapPolicy` / `TRAP_FRUSTRATION` |
+| `on high_novelty { ... }` | trap for surprise/unfamiliar structure | `TrapPolicy` / `TRAP_HIGH_NOVELTY` |
+| `probe p with [read_file, inspect_deps]` | read-only active-curiosity measurements | `OperatorRegistry.epistemic_probe` |
+| `recall analogy where similarity >= 0.72` | structural strategy recall | `MeraGraph` / `AnalogicalMatcher` |
 | `synthesize op name reducing eta` | replay-gated self-invention hook | `Synthesizer`, `DarkStateGate`, `OperatorRegistry` |
 | `collapse(p) -> sink` | explicit irreversible projection | `ColdSink.put("gauge_collapse", ...)` |
 | `recall sink where scale == L0` | restore pruned/latent branch | `ColdSink.records`, kernel checkpoint, gate reconciliation |
@@ -58,6 +62,29 @@ a `synthesize op` trap is triggered. The model is never the outer loop.
 Expressions support literals, identifiers, members, calls with keyword
 arguments, lists, arithmetic, comparisons, `in`, `and`, `or`, and `not`. They
 are evaluated by a safe tri-state interpreter; Python `eval()` is not used.
+
+## Plastic governance, curiosity, and analogy
+
+`plastic govern` enables the NumPy-only `HomeostaticRegulator`. It turns the gap
+between `predicted_drop` and `verified_drop`, the best analogical similarity,
+and the current risk level into live `eta_min`, `eta_high`, `tau`, `chi_max`,
+novelty, and `should_probe_first` values. `adaptation_rate` sets the surprise
+EMA coefficient. A high-novelty first tick emits `EPISTEMIC_PROBE` before
+`CRYSTALLIZE`; the kernel isolates writes and the read-only `probe` statement
+runs only `extern op` declarations with a `deforms(none)` footprint through
+`OperatorRegistry.epistemic_probe`. Mutating probe operators are rejected by the
+checker and skipped defensively at runtime.
+
+`recall analogy where similarity >= 0.72` encodes the workspace with a
+normalised singular/Schmidt spectrum plus AST motif ratios, then queries MERA
+L1/L2 `analogy` nodes. `coarse_grain()` registers one structural signature per
+promoted rule, so a strategy hint learned in one repository can transfer to a
+differently sized codebase. The best match feeds back into the homeostatic
+thresholds and into `ReflexLibrary.analogical_hint()`.
+
+`examples/netron_plastic.gauge` exercises all of these constructs alongside the
+existing `volume_law`, `drag`, `frustration`, `recall sink`, synthesis, and
+`collapse(fix) -> sink` traps. `examples/netron_solve.gauge` remains unchanged.
 
 ## VM module boundaries
 
@@ -234,6 +261,9 @@ without re-running a model.
   `collapse -> sink` can be replayed on later ticks.
 - Mutating operators go through `OperatorRegistry.apply`, which enforces the
   coordinate-shift write lock at the actual write boundary.
+- `EPISTEMIC_PROBE` locks writes before crystallisation. `probe ... with [...]`
+  accepts only `deforms(none)` extern operators, and `epistemic_probe` isolates
+  writes and skips any mutating spec at runtime.
 - `run_shell` is disabled by default and has a wildcard commutator footprint.
 - The cold sink is append-only; even deduplicated payloads retain all metadata
   commits in `state_commits`.

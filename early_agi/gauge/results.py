@@ -30,6 +30,7 @@ class GaugeRunResult:
     tick: dict[str, Any] = field(default_factory=dict)
     mera: dict[str, Any] = field(default_factory=dict)
     reflexes: dict[str, Any] = field(default_factory=dict)
+    plasticity: dict[str, Any] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -62,4 +63,5 @@ class GaugeRunResult:
             "tick": self.tick,
             "mera": self.mera,
             "reflexes": self.reflexes,
+            "plasticity": self.plasticity,
         }

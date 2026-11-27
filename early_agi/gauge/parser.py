@@ -59,6 +59,7 @@ class GaugeParser:
             "extern": self.parse_extern_op,
             "reversible": self.parse_transform,
             "govern": self.parse_govern,
+            "plastic": self.parse_plastic_govern,
         }
         handler = dispatch.get(tok.value)
         if handler is None:
@@ -98,10 +99,12 @@ class GaugeParser:
         name = self.expect("IDENT").value
         params, last_span = self.parse_ident_parens()
         mods: dict[str, list[str]] = {"deforms": [], "commutes": [], "after": []}
-        while self.peek().kind == "IDENT" and self.peek().value in mods:
+        aliases = {"communes": "commutes"}
+        while self.peek().kind == "IDENT" and (self.peek().value in mods or self.peek().value in aliases):
             mod_name = self.advance().value
+            target = aliases.get(mod_name, mod_name)
             items, last_span = self.parse_ident_parens()
-            mods[mod_name].extend(items)
+            mods[target].extend(items)
         return g.OpDecl(
             name=name,
             params=params,
@@ -135,6 +138,14 @@ class GaugeParser:
 
     def parse_govern(self) -> g.GovernDecl:
         kw = self.expect("IDENT", "govern")
+        return self._parse_govern(kw, plastic=False)
+
+    def parse_plastic_govern(self) -> g.GovernDecl:
+        kw = self.expect("IDENT", "plastic")
+        self.expect("IDENT", "govern")
+        return self._parse_govern(kw, plastic=True)
+
+    def _parse_govern(self, kw: Token, *, plastic: bool) -> g.GovernDecl:
         config: dict[str, g.Expr] = {}
         while True:
             key = self.expect("IDENT").value
@@ -145,7 +156,7 @@ class GaugeParser:
             else:
                 break
         body, end_span = self.parse_block()
-        return g.GovernDecl(config, body, kw.span.merge(end_span))
+        return g.GovernDecl(config, body, kw.span.merge(end_span), plastic=plastic)
 
     def parse_block(self) -> tuple[list[g.Statement], Span]:
         self.expect("PUNCT", "{")
@@ -181,11 +192,23 @@ class GaugeParser:
             metric = self.expect("IDENT")
             return g.SynthesizeStmt(op_name, metric.value, kw.span.merge(metric.span))
 
+        if kw := self.match_word("probe"):
+            manifold = self.expect("IDENT").value
+            self.expect("IDENT", "with")
+            self.expect("PUNCT", "[")
+            ops = self.parse_ident_list("]")
+            end = self.expect("PUNCT", "]")
+            return g.ProbeStmt(manifold, ops, kw.span.merge(end.span))
+
         if kw := self.match_word("recall"):
+            if self.match_word("analogy"):
+                self.expect("IDENT", "where")
+                cond = self.parse_expr()
+                return g.RecallStmt(cond, kw.span.merge(cond.span), kind="analogy")
             self.expect("IDENT", "sink")
             self.expect("IDENT", "where")
             cond = self.parse_expr()
-            return g.RecallStmt(cond, kw.span.merge(cond.span))
+            return g.RecallStmt(cond, kw.span.merge(cond.span), kind="sink")
 
         if kw := self.match_word("uncall"):
             name_tok = self.expect("IDENT")

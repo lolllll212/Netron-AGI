@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import ast as pyast
 from collections.abc import Mapping
 from typing import Any
 
@@ -27,6 +28,12 @@ from .runtime import ManifoldState, ReversibleTransform
 
 __all__ = ["GaugeOpcodeRunner"]
 
+_READ_ONLY_FOOTPRINTS = frozenset({"none", "read", "readonly", "read_only"})
+
+
+def _mutating_footprint(items: Any) -> tuple[str, ...]:
+    return tuple(str(item) for item in (items or ()) if str(item).casefold() not in _READ_ONLY_FOOTPRINTS)
+
 
 class GaugeOpcodeRunner:
     """Execute one bytecode instruction against the VM's focused modules."""
@@ -41,6 +48,43 @@ class GaugeOpcodeRunner:
     @property
     def traps(self) -> Any:
         return self.vm.traps_runner
+
+    def _measure_workspace(self) -> np.ndarray:
+        """Refresh the coupling matrix without advancing the governor."""
+        scanner = RepoScanner(self.vm.root, max_files=self.vm.settings.max_files)
+        graph = scanner.scan()
+        constraints = [
+            Constraint(id=f"manifold:{name}", paths=(".",)) for name in self.execution.manifolds
+        ] or [Constraint(id="gauge:workspace", paths=(".",))]
+        coupling = graph.coupling(constraints)
+        self.execution.coupling_matrix = np.asarray(coupling.matrix, dtype=np.float64)
+        self.execution.coupling_fingerprint = matrix_fingerprint(self.execution.coupling_matrix)
+        return self.execution.coupling_matrix
+
+    @staticmethod
+    def _motif_counts(execution: Any) -> tuple[int, int, int, int]:
+        files = list(execution.state.files)
+        sources = dict(execution.state.sources)
+        imports = 0
+        functions = 0
+        for text in sources.values():
+            try:
+                tree = pyast.parse(str(text))
+            except SyntaxError:
+                imports += sum(
+                    1 for line in str(text).splitlines() if line.strip().startswith(("import ", "from "))
+                )
+                functions += sum(
+                    1 for line in str(text).splitlines() if line.strip().startswith(("def ", "async def "))
+                )
+                continue
+            for node in pyast.walk(tree):
+                if isinstance(node, (pyast.Import, pyast.ImportFrom)):
+                    imports += 1
+                elif isinstance(node, (pyast.FunctionDef, pyast.AsyncFunctionDef)):
+                    functions += 1
+        gates = len(execution.gate_results) or len(execution.gate_defs)
+        return max(1, len(files)), imports, functions, gates
 
     def execute(self, instruction: Instruction) -> None:
         op = instruction.op
@@ -95,7 +139,7 @@ class GaugeOpcodeRunner:
 
     def _op_op_def(self, args: dict[str, Any], _instruction: Instruction) -> dict[str, Any]:
         name = str(args["name"])
-        deforms = tuple(str(item) for item in args.get("deforms", ()))
+        deforms = _mutating_footprint(args.get("deforms", ()))
         after = tuple(str(item) for item in args.get("after", ()))
         commutes = tuple(str(item) for item in args.get("commutes", ()))
         self.execution.op_after[name] = after
@@ -150,6 +194,40 @@ class GaugeOpcodeRunner:
             self.vm.synthesizer.eta_min = self.vm.kernel.governor.eta_min
         return {"config": config}
 
+    def _op_plastic_govern_begin(self, args: dict[str, Any], instruction: Instruction) -> dict[str, Any]:
+        config = self._op_govern_begin(args, instruction)["config"]
+        kernel = self.vm.kernel
+        kernel.plasticity = True
+        kernel.governor.enable_plasticity(
+            base_eta_min=float(config.get("eta_min", kernel.governor.eta_min)),
+            base_eta_high=float(config.get("eta_high", kernel.governor.eta_high)),
+            base_tau=float(config.get("tau", kernel.tau)),
+            base_chi_max=int(config.get("chi_max", kernel.chi_max)),
+            ema_alpha=float(config.get("adaptation_rate", 0.30)),
+        )
+        kernel.governor.eta_min = float(config.get("eta_min", kernel.governor.eta_min))
+        kernel.governor.eta_high = float(config.get("eta_high", kernel.governor.eta_high))
+        kernel.chi_max = max(1, int(config.get("chi_max", kernel.chi_max)))
+        kernel.tau = float(config.get("tau", kernel.tau))
+        thresholds = kernel.governor.modulate(0.0, 0.5)
+        self.execution.novelty_score = thresholds.novelty_score
+        previous_drops = kernel.governor.drops
+        self.execution.predicted_drop = float(previous_drops[-1]) if previous_drops else 0.0
+        info = {
+            "enabled": True,
+            "thresholds": thresholds.as_dict(),
+            "novelty_score": thresholds.novelty_score,
+            "predicted_drop": self.execution.predicted_drop,
+            "surprise_ema": round(kernel.governor.regulator.surprise_ema, 6),
+            "analogy": None,
+            "probe": None,
+        }
+        self.execution.plasticity = dict(info)
+        if thresholds.novelty_score > 0.65:
+            self.execution.events.add("high_novelty")
+        self.vm.result.plasticity = dict(info)
+        return {"config": config, "plasticity": dict(info)}
+
     # -- measurement and governance ----------------------------------------
     def _op_op_apply(self, args: dict[str, Any], _instruction: Instruction) -> dict[str, Any]:
         name = str(args.get("name") or call_name(args.get("expression")) or "")
@@ -167,13 +245,7 @@ class GaugeOpcodeRunner:
         return {"op": name, "result": result if isinstance(result, Mapping) else str(result)}
 
     def _op_ent_measure(self, args: dict[str, Any], _instruction: Instruction) -> dict[str, Any]:
-        scanner = RepoScanner(self.vm.root, max_files=self.vm.settings.max_files)
-        graph = scanner.scan()
-        constraints = [
-            Constraint(id=f"manifold:{name}", paths=(".",)) for name in self.execution.manifolds
-        ] or [Constraint(id="gauge:workspace", paths=(".",))]
-        coupling = graph.coupling(constraints)
-        self.execution.coupling_matrix = np.asarray(coupling.matrix, dtype=np.float64)
+        self._measure_workspace()
         self.execution.entanglement = self.vm.backend.measure_entanglement(
             self.execution.coupling_matrix,
             chi_max=self.vm.kernel.chi_max,
@@ -213,6 +285,11 @@ class GaugeOpcodeRunner:
             or (rolling is not None and rolling <= self.vm.kernel.governor.eta_min)
         )
         self.execution.events.clear()
+        thresholds = self.vm.kernel.governor.last_thresholds
+        if thresholds is not None:
+            self.execution.novelty_score = thresholds.novelty_score
+            if thresholds.novelty_score > 0.65:
+                self.execution.events.add("high_novelty")
         if report.is_volume_law:
             self.execution.events.update({"volume_law", "shift"})
         if self.execution.drag:
@@ -237,6 +314,10 @@ class GaugeOpcodeRunner:
             eta_cog=self.execution.eta,
             governor_directive=self.execution.directive,
             commit_gate_state=False,
+            predicted_drop=self.execution.predicted_drop,
+            analogy_similarity=self.execution.analogy_similarity,
+            risk_level=0.5,
+            probe_completed=bool(self.execution.probe_results),
             label=f"gauge:evolve:{args.get('manifold', 'manifold')}:{self.execution.run_index}",
         )
         chain = tuple(self.execution.applied_op_chain) or tuple(sorted(self.execution.applied_ops))
@@ -320,6 +401,72 @@ class GaugeOpcodeRunner:
 
     def _op_recall_sink(self, args: dict[str, Any], _instruction: Instruction) -> dict[str, Any]:
         return self.traps.recall_sink(args.get("condition"))
+
+    def _op_probe(self, args: dict[str, Any], _instruction: Instruction) -> dict[str, Any]:
+        """Run read-only extern operators before any mutating Gauge op."""
+        manifold = str(args.get("manifold", ""))
+        if manifold not in self.execution.manifolds:
+            raise GaugeRuntimeError(f"cannot probe unknown manifold {manifold!r}")
+        ops = [str(item) for item in args.get("ops", ())]
+        calls = [(name, {"state": self.execution.plain_state()}) for name in ops]
+        probe = self.vm.registry.epistemic_probe(calls) if calls else {"operators": [], "results": []}
+        self.execution.probe_results = list(probe["results"])
+        self.vm.kernel.governor.clear_probe()
+        self.vm.kernel.release_probe_lock()
+        thresholds = self.vm.kernel.governor.modulate(max(0.5, self.execution.analogy_similarity), 0.5)
+        self.execution.novelty_score = thresholds.novelty_score
+        self.execution.events.discard("high_novelty")
+        self.execution.plasticity.update(
+            {
+                "thresholds": thresholds.as_dict(),
+                "novelty_score": thresholds.novelty_score,
+                "probe": probe,
+            }
+        )
+        self.vm.result.plasticity = dict(self.execution.plasticity)
+        return {
+            "manifold": manifold,
+            "operators": ops,
+            "results": len(probe["results"]),
+            "probe": probe,
+        }
+
+    def _op_recall_analogy(self, args: dict[str, Any], _instruction: Instruction) -> dict[str, Any]:
+        """Recall a structural strategy from MERA L1/L2 memory."""
+        min_similarity = float(args.get("min_similarity", 0.72))
+        matrix = self._measure_workspace() if self.execution.coupling_matrix.size == 0 else None
+        matrix = matrix if matrix is not None else self.execution.coupling_matrix
+        num_modules, num_imports, num_functions, num_gates = self._motif_counts(self.execution)
+        signature = self.vm.graph.encode_signature(
+            matrix,
+            num_modules=num_modules,
+            num_imports=num_imports,
+            num_functions=num_functions,
+            num_gates=num_gates,
+        )
+        match = self.vm.graph.best_analogy(signature, min_similarity)
+        self.execution.analogy = match.as_dict() if match is not None else None
+        self.execution.analogy_similarity = match.similarity if match is not None else 0.0
+        if match is not None:
+            self.execution.predicted_drop = float(match.metadata.get("eta_mean", 0.0) or 0.0)
+        probe_familiarity = 0.5 if self.execution.probe_results else 0.0
+        familiarity = max(self.execution.analogy_similarity, probe_familiarity)
+        thresholds = self.vm.kernel.governor.modulate(familiarity, 0.5)
+        self.execution.novelty_score = thresholds.novelty_score
+        self.execution.plasticity.update(
+            {
+                "thresholds": thresholds.as_dict(),
+                "novelty_score": thresholds.novelty_score,
+                "analogy": self.execution.analogy,
+            }
+        )
+        self.vm.result.plasticity = dict(self.execution.plasticity)
+        return {
+            "match": self.execution.analogy is not None,
+            "similarity": self.execution.analogy_similarity,
+            "strategy_hint": match.strategy_hint if match is not None else "",
+            "min_similarity": min_similarity,
+        }
 
     def _op_collapse_sink(self, args: dict[str, Any], _instruction: Instruction) -> dict[str, Any]:
         name = str(args["manifold"])

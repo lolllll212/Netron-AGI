@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Added `early_agi/core/plasticity.py`: NumPy-only `AdaptiveThresholds` / `HomeostaticRegulator`, structural `AnalogicalMatcher`, `AutonomyProfile` / `UserCoAdapter`, and `SynapticDecay` with fast weights.
+- Added compatibility alias `KernelDirective` and `Directive.EPISTEMIC_PROBE`; high-novelty first ticks now request read-only epistemic probing before crystallisation.
+- Added `OperatorRegistry.epistemic_probe()` and a read-only `inspect_deps` operator; probe calls skip mutating specs and isolate writes.
+- Added Gauge `plastic govern`, `on high_novelty`, `probe ... with [...]`, and `recall analogy where similarity >= ...` syntax, plus `examples/netron_plastic.gauge`.
+- Added structural signatures to MERA L1/L2 promotion, persisted `analogy` nodes, `MeraGraph.best_analogy()`, and `ReflexLibrary.analogical_hint()`.
+- Added implicit user-feedback records in `ColdSink`, live profile injection into `DualTierRouter` / `ScriptedRouter`, and adaptive session risk/probe handling.
+- Added `tests/test_plasticity.py` and `tests/test_gauge_plasticity.py`, documenting the five upgrades and Gauge syntax end to end.
 - Added `EARLY_AGI_BACKEND` / `Settings.backend` and `--backend` selectors for `classical_svd`, `bounded_chi`, and the `thrml` adapter seams.
 - Wired the selected backend through `build_runtime()`, `GaugeVM`, Gauge results, and the offline demo; added an optional `[thrml]` extra and CI smoke coverage.
 - **Gauge**, a custom cognitive and thermodynamic orchestration language: span-tagged lexer/AST/parser, static algebra and reversibility checker, safe tri-state expression evaluator, compact bytecode IR/compiler, hybrid VM, CLI (`python -m early_agi.gauge`), docs, and `examples/netron_solve.gauge`.
@@ -23,7 +30,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
-- `GaugeRunResult` now reports `run_index`, fused-reflex summaries, and rich synthesis replay metadata.
+- `ThermodynamicGovernor` keeps fixed thresholds by default and, when plasticity is enabled, derives live `eta_min`, `eta_high`, `tau`, `chi_max`, novelty, and probe policy from surprise, analogy similarity, and risk.
+- `EarlyAGIKernel.tick()` accepts `predicted_drop`, `analogy_similarity`, `risk_level`, and `probe_completed`, persists plasticity checkpoints, and releases probe locks after read-only measurements.
+- `CompiledReflex` carries confidence; `ReflexLibrary` skips faded habits and time/surprise-weighted fast weights archive outcomes in `reflex_outcome`.
+- `AgentSession.turn()` accepts `user_overrode`, archives rejected edits/reverts/overrides/prompt brevity, and feeds the live profile into router system briefs.
+- `GaugeRunResult` now reports `run_index`, fused-reflex summaries, rich synthesis replay metadata, and a `plasticity` section.
 - Gauge expression built-ins, workspace/manifold state, trap evaluation, inverse-stack rollback, and opcode handlers are no longer embedded in the VM dispatcher.
 - `docs/gauge.md`, `README.md`, `SECURITY.md`, and this changelog now describe the replay gate, bounded-χ backend, and optional THRML seam.
 

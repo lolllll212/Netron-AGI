@@ -1,0 +1,45 @@
+// Plastic Gauge: homeostasis, active curiosity, and structural recall.
+scale L0 -> L2
+
+manifold fix : PatchSpace {
+    scope in repo.ast.modules
+    max_tokens <= 4000
+    entanglement_bound <= 0.15
+}
+
+gate syntax_valid(m) : ast_check(m.files) == true
+gate tests_passing(m) : pytest_run(m.targets) == true and not m.has_regressions
+
+extern op read_file(m) deforms(none) commutes(all)
+extern op inspect_deps(m) deforms(none) commutes(all)
+extern op capture_baseline(m) deforms(repo_state) commutes(none)
+extern op apply_candidate(m) deforms(repo_state) after(capture_baseline)
+
+reversible transform module_cut(p : PatchSpace) -> CutGraph {
+    reencode(p, basis = dependency_cut)
+}
+
+plastic govern eta_min = 0.20, chi_max = 8, adaptation_rate = 0.30 {
+    evolve fix under [syntax_valid, tests_passing]
+
+    on high_novelty {
+        probe fix with [read_file, inspect_deps]
+    }
+
+    on volume_law(ent) {
+        fix = module_cut(fix)
+    }
+
+    on drag(eta) {
+        synthesize op disentangle_cut reducing eta
+    }
+
+    on frustration {
+        uncall module_cut
+        recall sink where scale == L0
+    }
+
+    recall analogy where similarity >= 0.72
+
+    collapse(fix) -> sink
+}

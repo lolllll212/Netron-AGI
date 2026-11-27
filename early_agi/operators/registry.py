@@ -200,6 +200,41 @@ class OperatorRegistry:
         self.turn += 1
         return self.turn
 
+    def epistemic_probe(
+        self,
+        calls: Sequence[tuple[str, Mapping[str, Any]]] | None = None,
+    ) -> dict[str, Any]:
+        """Run cheap read-only operators while temporarily isolating writes."""
+        if calls is None:
+            calls = (
+                ("inspect_deps", {}),
+                ("run_pytest", {"paths": (), "timeout": 30.0}),
+                ("check_z3", {"smt2": "(check-sat)", "timeout_ms": 1000}),
+            )
+        previous = self._lock_reason
+        self.isolate_writes(reason="EPISTEMIC_PROBE (read-only measurements only)")
+        results: list[dict[str, Any]] = []
+        try:
+            for name, kwargs in calls:
+                spec = self.operator(name)
+                if spec.mutates:
+                    results.append({"operator": name, "skipped": "mutating operator"})
+                    continue
+                try:
+                    value = self.apply(name, **dict(kwargs))
+                    results.append(
+                        {
+                            "operator": name,
+                            "ok": True,
+                            "value": value if isinstance(value, Mapping) else str(value)[:500],
+                        }
+                    )
+                except Exception as exc:  # probing must never abort the turn
+                    results.append({"operator": name, "ok": False, "error": f"{type(exc).__name__}: {exc}"})
+        finally:
+            self._lock_reason = previous
+        return {"operators": [name for name, _ in calls], "results": results}
+
     def snapshot(self) -> dict[str, Any]:
         """Capture mutable bookkeeping for a transactional session turn."""
         return {
@@ -413,6 +448,39 @@ def build_default_registry(root: str | Path, *, allow_shell: bool = False) -> Op
     def read_file(path: str) -> str:
         return _safe_join(base, path).read_text(encoding="utf-8", errors="replace")
 
+    def inspect_deps() -> dict[str, Any]:
+        """Read-only AST motif census used by epistemic probing."""
+        ignored = {".git", "__pycache__", ".venv", "venv", "node_modules", "build", "dist"}
+        files: list[str] = []
+        imports: set[str] = set()
+        functions = 0
+        calls = 0
+        for target in sorted(base.rglob("*.py")):
+            relative = target.relative_to(base).as_posix()
+            if any(part in ignored for part in target.relative_to(base).parts):
+                continue
+            files.append(relative)
+            try:
+                tree = ast.parse(target.read_text(encoding="utf-8", errors="replace"))
+            except (OSError, SyntaxError):
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imports.update(alias.name for alias in node.names)
+                elif isinstance(node, ast.ImportFrom):
+                    imports.add(node.module or "")
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    functions += 1
+                elif isinstance(node, ast.Call):
+                    calls += 1
+        return {
+            "modules": len(files),
+            "imports": sorted(item for item in imports if item),
+            "functions": functions,
+            "calls": calls,
+            "files": files[:32],
+        }
+
     def _expected_bytes(expected: str | bytes | None) -> bytes | None:
         if expected is None:
             return None
@@ -486,6 +554,14 @@ def build_default_registry(root: str | Path, *, allow_shell: bool = False) -> Op
                 reads=frozenset({"{path}"}),
                 cost=0.1,
                 description="read a repository file",
+            ),
+            OperatorSpec(
+                name="inspect_deps",
+                fn=inspect_deps,
+                kind=READ,
+                reads=frozenset({"*"}),
+                cost=0.2,
+                description="read-only AST import/function/call census for epistemic probing",
             ),
             OperatorSpec(
                 name="write_file",

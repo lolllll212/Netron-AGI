@@ -50,6 +50,9 @@ jobs:
           python -m early_agi.gauge compile examples/netron_solve.gauge --compact --no-dotenv > gauge-ir.json
           python -m early_agi.gauge run examples/netron_solve.gauge --root . --compact --no-dotenv --output gauge-run.json
           python -c "import json; d=json.load(open('gauge-run.json', encoding='utf-8')); assert d['ok'], d['violations']"
+          python -m early_agi.gauge check examples/netron_plastic.gauge --compact --no-dotenv
+          python -m early_agi.gauge run examples/netron_plastic.gauge --root . --compact --no-dotenv --output gauge-plastic-run.json
+          python -c 'import json; d=json.load(open("gauge-plastic-run.json", encoding="utf-8")); assert d["ok"], d["violations"]; assert d["plasticity"]["enabled"], d; assert d["plasticity"]["probe"]["results"], d'
 
   lint:
     name: lint (ruff, pinned)

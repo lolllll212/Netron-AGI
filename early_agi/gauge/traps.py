@@ -27,6 +27,7 @@ class TrapPolicy:
         "stall": frozenset({"stall", "drag"}),
         "shift": frozenset({"shift", "volume_law"}),
         "recall": frozenset({"recall", "frustration"}),
+        "high_novelty": frozenset({"high_novelty"}),
     }
 
     @classmethod

@@ -28,6 +28,7 @@ is opt-in.
 | 3 | Qualified call/import coupling scanner with explicit truncation reporting | working (`core/coupling.py`) |
 | 3 | MERA L0→L1 store using the backend `truncate`/`left_basis` contract | working (`memory/mera_graph.py`) |
 | 3 | Task-aware reflex compilation: recurring verified edit → zero-LLM replay | working (`memory/reflex.py`) |
+| 5 | Homeostatic thresholds, structural analogy, active probes, graceful unlearning, user co-adaptation | working (`core/plasticity.py`) |
 | 4 | **Gauge frontend**: lexer, spans, AST, parser, static checker, IR, compiler | working (`gauge/`, `examples/`, `docs/gauge.md`) |
 | 4 | **Hybrid Thermodynamic VM**: real sink/backend/governor/gates/registry | working (`gauge/vm.py`) |
 | 4 | **Validated operator synthesis**: offline default, positive efficiency gain required | working (`gauge/synthesizer.py`) |
@@ -39,7 +40,8 @@ early_agi/
 ├── core/
 │   ├── cold_sink.py        # hash-addressed SQLite reversible archive
 │   ├── entropy_sensor.py   # SVD spectral entropy & volume-law detector
-│   ├── governor.py         # rolling eta_cog thermodynamic controller
+│   ├── governor.py         # adaptive eta_cog thermodynamic controller
+│   ├── plasticity.py       # homeostasis, analogy, decay, and user co-adaptation
 │   ├── coupling.py         # bipartite incidence matrix from imports + calls
 │   └── kernel.py           # tick loop, semantic shift verification, checkpoints
 ├── gauge/
@@ -100,6 +102,8 @@ python -m early_agi.gauge check examples/netron_solve.gauge
 python -m early_agi.gauge compile examples/netron_solve.gauge --output ir.json
 python -m early_agi.gauge run examples/netron_solve.gauge --root . --output run.json
 python -m early_agi.gauge run examples/netron_solve.gauge --root . --backend bounded_chi --output bounded-run.json
+python -m early_agi.gauge check examples/netron_plastic.gauge
+python -m early_agi.gauge run examples/netron_plastic.gauge --root . --output plastic-run.json
 ```
 
 `check` reports static algebra/reversibility errors. `compile` shows the exact
@@ -221,6 +225,19 @@ match. Failed replays are restored and repeated misses retire it.
 Python loops. `.gauge` scripts compile to deterministic IR; `vm.py` is a thin
 dispatcher with focused modules for instructions, state, built-ins, traps, and
 results. See [docs/gauge.md](docs/gauge.md).
+
+**Plasticity.** `core/plasticity.py` adds a NumPy-only homeostatic regulator,
+scale-invariant analogical matcher, synaptic decay with fast weights, and an
+implicit user co-adapter. `ThermodynamicGovernor` adapts `eta_min`, `eta_high`,
+`tau`, `chi_max`, novelty, and `should_probe_first` from predicted/verified
+surprise, analogy similarity, and risk; `MeraGraph` promotes structural
+signatures at L1/L2 and `ReflexLibrary` recalls strategy hints. A high-novelty
+first tick emits the compatibility-alias `KernelDirective.EPISTEMIC_PROBE`, and
+`OperatorRegistry.epistemic_probe` permits only READ operators. Compiled reflex
+confidence fades with time, surprise, and fast-weight drift. `AgentSession`
+archives accepted edits, reverts, overrides, rejected edits, and prompt brevity
+as `user_feedback` records and feeds the live profile into `DualTierRouter` /
+`ScriptedRouter`. `examples/netron_plastic.gauge` demonstrates the Gauge syntax.
 
 ## Limitations
 

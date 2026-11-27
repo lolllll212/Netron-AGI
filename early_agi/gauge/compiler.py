@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from . import ast as g
-from .checker import CheckedProgram, call_name, validate_program
+from .checker import CheckedProgram, call_name, literal_number, validate_program
 from .ir import Instruction, ProgramIR
 from .span import Span
 
@@ -16,7 +16,16 @@ def _event_opcode(event: str) -> str:
         "stall": "TRAP_STALL",
         "shift": "TRAP_SHIFT",
         "recall": "TRAP_RECALL",
+        "high_novelty": "TRAP_HIGH_NOVELTY",
     }.get(event, "TRAP_GENERIC")
+
+
+def _analogy_threshold(expr: g.Expr) -> float:
+    if isinstance(expr, g.BinaryExpr):
+        value = literal_number(expr.right)
+        if value is not None:
+            return float(value)
+    return 0.72
 
 
 class GaugeCompiler:
@@ -83,7 +92,8 @@ class GaugeCompiler:
                     )
                 )
             elif isinstance(decl, g.GovernDecl):
-                setup.append(Instruction("GOVERN_BEGIN", {"config": dict(decl.config)}, span=decl.span))
+                opcode = "PLASTIC_GOVERN_BEGIN" if decl.plastic else "GOVERN_BEGIN"
+                setup.append(Instruction(opcode, {"config": dict(decl.config)}, span=decl.span))
                 body.extend(self._compile_block(decl.body))
         body.append(Instruction("HALT", span=self.checked.program.span))
         metadata = {
@@ -144,7 +154,26 @@ class GaugeCompiler:
                 )
             ]
         if isinstance(stmt, g.RecallStmt):
+            if stmt.kind == "analogy":
+                return [
+                    Instruction(
+                        "RECALL_ANALOGY",
+                        {
+                            "condition": stmt.condition,
+                            "min_similarity": _analogy_threshold(stmt.condition),
+                        },
+                        span=stmt.span,
+                    )
+                ]
             return [Instruction("RECALL_SINK", {"condition": stmt.condition}, span=stmt.span)]
+        if isinstance(stmt, g.ProbeStmt):
+            return [
+                Instruction(
+                    "PROBE",
+                    {"manifold": stmt.manifold, "ops": list(stmt.ops)},
+                    span=stmt.span,
+                )
+            ]
         if isinstance(stmt, g.CollapseStmt):
             return [
                 Instruction(

@@ -25,12 +25,14 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..core.cold_sink import SinkRecord, canonical_json
+from ..core.plasticity import AnalogyMatch, StructuralSignature, SynapticDecay
 from ..operators.registry import OperatorSpec
 from .mera_graph import MeraGraph
 
@@ -120,6 +122,8 @@ class CompiledReflex:
     hits: int = 0
     misses: int = 0
     task_signatures: tuple[str, ...] = ()
+    confidence: float = 1.0
+    created_at: float | None = None
 
     @property
     def short(self) -> str:
@@ -140,6 +144,7 @@ class CompiledReflex:
             "hits": self.hits,
             "misses": self.misses,
             "task_signatures": list(self.task_signatures),
+            "confidence": self.confidence,
         }
 
 
@@ -488,9 +493,18 @@ def compile_operator_reflexes(
 class ReflexLibrary:
     """Read-side view over compiled reflexes, plus the fire/retire bookkeeping."""
 
-    def __init__(self, graph: MeraGraph, *, miss_limit: int = 2) -> None:
+    def __init__(
+        self,
+        graph: MeraGraph,
+        *,
+        miss_limit: int = 2,
+        confidence_threshold: float = 0.18,
+        decay: SynapticDecay | None = None,
+    ) -> None:
         self.graph = graph
         self.miss_limit = max(1, miss_limit)
+        self.confidence_threshold = float(confidence_threshold)
+        self.decay = decay or SynapticDecay()
 
     def compile(self, *, min_support: int = 2, limit: int = 2000) -> ReflexCompileReport:
         return compile_reflexes(self.graph, min_support=min_support, limit=limit)
@@ -557,6 +571,32 @@ class ReflexLibrary:
             return reflex
         return None
 
+    def best_analogy(
+        self, signature: StructuralSignature, min_similarity: float = 0.72
+    ) -> AnalogyMatch | None:
+        """Recall a structurally similar strategy from MERA L1/L2 memory."""
+        return self.graph.best_analogy(signature, min_similarity=min_similarity)
+
+    def analogical_hint(
+        self,
+        coupling_matrix: Any,
+        *,
+        num_modules: int,
+        num_imports: int,
+        num_functions: int,
+        num_gates: int,
+        min_similarity: float = 0.72,
+    ) -> AnalogyMatch | None:
+        """Encode a workspace and query structural analogues in one step."""
+        signature = self.graph.encode_signature(
+            coupling_matrix,
+            num_modules=num_modules,
+            num_imports=num_imports,
+            num_functions=num_functions,
+            num_gates=num_gates,
+        )
+        return self.best_analogy(signature, min_similarity=min_similarity)
+
     # -- loading ------------------------------------------------------------
     def _outcomes(self) -> dict[str, list[bool]]:
         outcomes: dict[str, list[bool]] = {}
@@ -579,6 +619,12 @@ class ReflexLibrary:
                 continue
             history = outcomes.get(node["hash"], [])
             rules = self.graph.sources(node["hash"], "compiled_into")
+            hits = sum(1 for ok in history if ok)
+            misses = sum(1 for ok in history if not ok)
+            support = len(self.graph.sources(node["hash"], "compiled_from"))
+            created_at = node.get("created_at")
+            elapsed_hours = max(0.0, time.time() - float(created_at)) / 3600.0 if created_at else 0.0
+            age_steps = max(0, len(history) - hits) + int(elapsed_hours) + int(self.decay.surprise_ema * 2)
             compiled.append(
                 CompiledReflex(
                     hash=node["hash"],
@@ -586,13 +632,17 @@ class ReflexLibrary:
                     edits=edits,
                     expected_gates=tuple(str(g) for g in payload.get("expected_gates", [])),
                     pattern=tuple(str(feature) for feature in payload.get("pattern", [])),
-                    support=len(self.graph.sources(node["hash"], "compiled_from")),
+                    support=support,
                     rule=rules[0] if rules else "",
-                    hits=sum(1 for ok in history if ok),
-                    misses=sum(1 for ok in history if not ok),
+                    hits=hits,
+                    misses=misses,
                     task_signatures=tuple(
                         str(item) for item in payload.get("task_signatures", ()) if isinstance(item, str)
                     ),
+                    confidence=self.decay.confidence(
+                        support=support, hits=hits, misses=misses, age_steps=age_steps
+                    ),
+                    created_at=created_at,
                 )
             )
         return sorted(compiled, key=lambda reflex: (len(reflex.expected_gates), reflex.support), reverse=True)
@@ -611,6 +661,8 @@ class ReflexLibrary:
         best: CompiledReflex | None = None
         for reflex in self.reflexes():
             if reflex.misses >= self.miss_limit:
+                continue
+            if reflex.confidence < self.confidence_threshold:
                 continue
             if signature is not None and signature not in reflex.task_signatures:
                 continue
@@ -631,7 +683,9 @@ class ReflexLibrary:
         eta_cog: float | None = None,
         parent_hash: str | None = None,
     ) -> str:
-        """Archive the outcome; the sink stays the single source of truth."""
+        """Archive the outcome and fade confidence on surprise or failure."""
+        surprise = abs(float(eta_cog)) if eta_cog is not None else (0.0 if ok else 1.0)
+        self.decay.observe(ok=ok, surprise=surprise)
         return self.graph.sink.put(
             "reflex_outcome",
             {
@@ -640,6 +694,8 @@ class ReflexLibrary:
                 "ok": bool(ok),
                 "tick": parent_hash,
                 "eta_cog": None if eta_cog is None else round(float(eta_cog), 6),
+                "surprise_ema": round(self.decay.surprise_ema, 6),
+                "fast_weight": round(self.decay.fast_weight, 6),
             },
             scale=0,
             parent_hash=parent_hash,

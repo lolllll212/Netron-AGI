@@ -25,8 +25,23 @@ IRREVERSIBLE_CALLS = {
     "drop",
     "discard",
 }
-KNOWN_EVENTS = {"volume_law", "drag", "frustration", "stall", "shift", "recall"}
+KNOWN_EVENTS = {"volume_law", "drag", "frustration", "stall", "shift", "recall", "high_novelty"}
 KNOWN_METRICS = {"eta", "ent", "chi", "loss", "frustration"}
+KNOWN_GOVERN_OPTIONS = {
+    "eta_min",
+    "chi_max",
+    "eta_high",
+    "tau",
+    "window",
+    "stall_ticks",
+    "gate_bits",
+    "adaptation_rate",
+}
+READ_ONLY_FOOTPRINTS = frozenset({"none", "read", "readonly", "read_only"})
+
+
+def _mutating_footprint(items: Iterable[str]) -> tuple[str, ...]:
+    return tuple(item for item in items if str(item).casefold() not in READ_ONLY_FOOTPRINTS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,7 +182,7 @@ def _check_op_order(ops: dict[str, g.OpDecl], issues: list[CheckIssue]) -> tuple
                     )
                 )
         for peer in op.commutes:
-            if peer != "none" and peer not in ops:
+            if peer not in {"none", "all", "*"} and peer not in ops:
                 issues.append(
                     CheckIssue(
                         "error",
@@ -208,7 +223,17 @@ def _check_transform(
 ) -> None:
     local_names = {name for name, _type in decl.params}
     for stmt in walk_statements(decl.body):
-        if isinstance(stmt, (g.CollapseStmt, g.RecallStmt, g.SynthesizeStmt, g.EvolveStmt, g.TrapHandler)):
+        if isinstance(
+            stmt,
+            (
+                g.CollapseStmt,
+                g.RecallStmt,
+                g.SynthesizeStmt,
+                g.EvolveStmt,
+                g.TrapHandler,
+                g.ProbeStmt,
+            ),
+        ):
             issues.append(
                 CheckIssue(
                     "error",
@@ -270,6 +295,19 @@ def _check_recall_condition(cond: g.Expr, scales: set[str], issues: list[CheckIs
             )
 
 
+def _check_analogy_condition(cond: g.Expr, issues: list[CheckIssue]) -> None:
+    if not isinstance(cond, g.BinaryExpr) or cond.op not in {"==", ">=", ">", "<=", "<"}:
+        issues.append(CheckIssue("error", "recall analogy needs a similarity comparison", cond.span))
+        return
+    threshold = literal_number(cond.right)
+    if threshold is None or not 0.0 <= threshold <= 1.0:
+        issues.append(
+            CheckIssue("error", "analogy similarity threshold must be a number in [0, 1]", cond.span)
+        )
+    if not any(isinstance(node, g.IdentExpr) and node.name == "similarity" for node in expr_nodes(cond.left)):
+        issues.append(CheckIssue("warning", "analogy condition should reference 'similarity'", cond.span))
+
+
 def _check_govern(
     decl: g.GovernDecl,
     manifolds: dict[str, g.ManifoldDecl],
@@ -287,7 +325,7 @@ def _check_govern(
     if chi_max is None or chi_max < 1 or not float(chi_max).is_integer():
         issues.append(CheckIssue("error", "govern requires integer chi_max >= 1", decl.span))
     for key, value in decl.config.items():
-        if key not in {"eta_min", "chi_max", "eta_high", "tau", "window", "stall_ticks", "gate_bits"}:
+        if key not in KNOWN_GOVERN_OPTIONS:
             issues.append(CheckIssue("warning", f"unknown govern option {key!r}", decl.span))
         elif literal_number(value) is None and key in {
             "eta_high",
@@ -295,8 +333,11 @@ def _check_govern(
             "window",
             "stall_ticks",
             "gate_bits",
+            "adaptation_rate",
         }:
             issues.append(CheckIssue("error", f"govern option {key!r} must be numeric", decl.span))
+    if decl.plastic and "adaptation_rate" not in decl.config:
+        issues.append(CheckIssue("warning", "plastic govern usually declares adaptation_rate", decl.span))
 
     for stmt in walk_statements(decl.body):
         if isinstance(stmt, g.EvolveStmt):
@@ -324,7 +365,25 @@ def _check_govern(
                     CheckIssue("warning", f"unusual synthesis metric {stmt.target_metric!r}", stmt.span)
                 )
         elif isinstance(stmt, g.RecallStmt):
-            _check_recall_condition(stmt.condition, scales, issues)
+            if stmt.kind == "analogy":
+                _check_analogy_condition(stmt.condition, issues)
+            else:
+                _check_recall_condition(stmt.condition, scales, issues)
+        elif isinstance(stmt, g.ProbeStmt):
+            if stmt.manifold not in manifolds:
+                issues.append(
+                    CheckIssue("error", f"probe references unknown manifold {stmt.manifold!r}", stmt.span)
+                )
+            for op_name in stmt.ops:
+                op = ops.get(op_name)
+                if op is None:
+                    issues.append(
+                        CheckIssue("error", f"probe references unknown operator {op_name!r}", stmt.span)
+                    )
+                elif _mutating_footprint(op.deforms):
+                    issues.append(
+                        CheckIssue("error", f"probe operator {op_name!r} must be read-only", stmt.span)
+                    )
         elif isinstance(stmt, g.CollapseStmt):
             if stmt.manifold not in manifolds:
                 issues.append(

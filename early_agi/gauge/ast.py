@@ -66,6 +66,7 @@ class GovernDecl:
     config: dict[str, Expr]
     body: list[Statement]
     span: Span
+    plastic: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +94,14 @@ class SynthesizeStmt:
 @dataclass(frozen=True, slots=True)
 class RecallStmt:
     condition: Expr
+    span: Span
+    kind: str = "sink"
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeStmt:
+    manifold: str
+    ops: list[str]
     span: Span
 
 
@@ -205,6 +214,7 @@ __all__ = [
     "ManifoldDecl",
     "MemberExpr",
     "OpDecl",
+    "ProbeStmt",
     "Program",
     "RecallStmt",
     "ScaleDecl",

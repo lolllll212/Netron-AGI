@@ -9,6 +9,7 @@ from typing import Any, Protocol
 
 from ..core.cold_sink import canonical_json
 from ..core.kernel import ShiftArtifact
+from ..core.plasticity import AutonomyProfile
 from .client import LLMUnavailable, OpenAICompatibleClient
 
 __all__ = [
@@ -43,6 +44,20 @@ Produce exactly one coordinate shift as JSON:
 {"kind": "new_operator", "payload": {"name": "<identifier>", "source": "<python source defining it>"}, "rationale": "..."}
 Choose the smallest artefact that actually disentangles the coupling.
 """
+
+
+def _profile_system(system: str, profile: AutonomyProfile | None) -> str:
+    """Inject implicit user preferences into the executor system brief."""
+    if profile is None:
+        return system
+    data = profile.as_dict()
+    return (
+        f"{system}\n\nLive user co-adaptation profile (adapt, do not restate):\n"
+        f"- patch granularity: {data['patch_granularity']}\n"
+        f"- probe before edit: {str(data['probe_before_edit']).lower()}\n"
+        f"- rationale style: {data['rationale_style']}\n"
+        f"- observed accept rate: {data['accept_rate']}\n"
+    )
 
 
 class RouterError(RuntimeError):
@@ -171,6 +186,11 @@ class DualTierRouter:
     def __init__(self, fast: OpenAICompatibleClient, deep: OpenAICompatibleClient) -> None:
         self.fast = fast
         self.deep = deep
+        self.user_profile: AutonomyProfile | None = None
+
+    def set_user_profile(self, profile: AutonomyProfile | None) -> None:
+        """Receive the live implicit user model from the session."""
+        self.user_profile = profile
 
     @classmethod
     def from_settings(cls, settings: Any = None) -> DualTierRouter:
@@ -200,10 +220,9 @@ class DualTierRouter:
         data, reply = self.deep.chat_json(self._messages(REASONER_SYSTEM, brief))
         return parse_shift(data, tokens=reply.tokens, latency_ms=reply.latency_ms)
 
-    @staticmethod
-    def _messages(system: str, brief: Mapping[str, Any]) -> list[dict[str, str]]:
+    def _messages(self, system: str, brief: Mapping[str, Any]) -> list[dict[str, str]]:
         return [
-            {"role": "system", "content": system},
+            {"role": "system", "content": _profile_system(system, self.user_profile)},
             {"role": "user", "content": canonical_json(brief)},
         ]
 
@@ -222,6 +241,11 @@ class ScriptedRouter:
         self._shifts: deque[Any] = deque(shifts)
         self.strict = strict
         self.calls: list[str] = []
+        self.user_profile: AutonomyProfile | None = None
+
+    def set_user_profile(self, profile: AutonomyProfile | None) -> None:
+        """Accept the same live profile hook as the networked router."""
+        self.user_profile = profile
 
     def execute(self, brief: Mapping[str, Any]) -> TurnProposal:
         self.calls.append("execute")

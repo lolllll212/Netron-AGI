@@ -103,6 +103,12 @@ class GaugeExecutionState:
         self.gate_state_committed = False
         self.status = "running"
         self.halted = False
+        self.analogy: dict[str, Any] | None = None
+        self.analogy_similarity = 0.0
+        self.predicted_drop = 0.0
+        self.probe_results: list[dict[str, Any]] = []
+        self.novelty_score = 0.0
+        self.plasticity: dict[str, Any] = {}
 
     def scan_workspace(self) -> WorkspaceView:
         scanner = RepoScanner(self.vm.root, max_files=self.vm.settings.max_files)
@@ -169,6 +175,12 @@ class GaugeExecutionState:
                 "targets": list(self.state.targets),
                 "has_regressions": self.state.has_regressions,
             },
+            "analogy": self.analogy,
+            "analogy_similarity": self.analogy_similarity,
+            "predicted_drop": self.predicted_drop,
+            "novelty_score": self.novelty_score,
+            "probe_results": list(self.probe_results),
+            "plasticity": dict(self.plasticity),
         }
         workspace = self.view()
         state["workspace"] = workspace.as_dict()
@@ -200,6 +212,9 @@ class GaugeExecutionState:
             "eta": self.eta,
             "chi": self.vm.kernel.chi_max,
             "sink": {"records": self.vm.sink.count()},
+            "similarity": self.analogy_similarity,
+            "novelty": self.novelty_score,
+            "score": self.novelty_score,
             **self.variables,
         }
         for name, manifold in self.manifolds.items():
@@ -262,7 +277,17 @@ class GaugeExecutionState:
 
     def execute_transform_statement(self, stmt: g.Statement, context: EvaluationContext) -> None:
         """Run a reversible transform body; destructive operations are refused."""
-        if isinstance(stmt, (g.CollapseStmt, g.RecallStmt, g.SynthesizeStmt, g.TrapHandler, g.EvolveStmt)):
+        if isinstance(
+            stmt,
+            (
+                g.CollapseStmt,
+                g.RecallStmt,
+                g.SynthesizeStmt,
+                g.TrapHandler,
+                g.EvolveStmt,
+                g.ProbeStmt,
+            ),
+        ):
             raise GaugeRuntimeError(f"{type(stmt).__name__} is irreversible inside a transform")
         if isinstance(stmt, g.AssignStmt):
             value = evaluate(stmt.value, context)

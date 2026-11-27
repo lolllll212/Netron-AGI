@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import sqlite3
 import threading
@@ -17,6 +18,7 @@ import numpy as np
 from ..backends.base import RelaxationBackend
 from ..backends.classical_svd import ClassicalSVDBackend
 from ..core.cold_sink import ColdSink, SinkRecord, canonical_json
+from ..core.plasticity import AnalogicalMatcher, AnalogyMatch, StructuralSignature
 
 __all__ = ["CoarseGrainReport", "MeraGraph"]
 
@@ -63,6 +65,7 @@ class CoarseGrainReport:
     truncation_error: float = 0.0
     spectral_entropy_bits: float = 0.0
     skipped: str = ""
+    analogies: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -74,6 +77,7 @@ class CoarseGrainReport:
             "truncation_error": round(self.truncation_error, 4),
             "spectral_entropy_bits": round(self.spectral_entropy_bits, 4),
             "skipped": self.skipped,
+            "analogies": self.analogies,
         }
 
 
@@ -83,6 +87,47 @@ def _features(record: SinkRecord) -> tuple[str, ...]:
     passed = tuple(sorted(name for name, verdict in gates.items() if verdict == "pass"))
     directive = str(payload.get("directive", ""))
     return tuple([*(f"gate:{name}" for name in passed), f"directive:{directive}"])
+
+
+def _motif_counts(records: Sequence[SinkRecord]) -> tuple[int, int, int, int]:
+    """AST motif ratios used by the scale-invariant analogical signature."""
+    files: set[str] = set()
+    imports = 0
+    functions = 0
+    gates = 0
+    for record in records:
+        state = record.payload.get("state")
+        if not isinstance(state, Mapping):
+            state = {}
+        for path in state.get("files") or state.get("paths") or ():
+            files.add(str(path))
+        workspace = record.payload.get("workspace")
+        if isinstance(workspace, Mapping) and not files:
+            for path in workspace.get("files") or ():
+                files.add(str(path))
+        sources = state.get("sources")
+        if isinstance(sources, Mapping):
+            for source in sources.values():
+                text = str(source)
+                try:
+                    tree = ast.parse(text)
+                except SyntaxError:
+                    imports += sum(
+                        1 for line in text.splitlines() if line.strip().startswith(("import ", "from "))
+                    )
+                    functions += sum(
+                        1 for line in text.splitlines() if line.strip().startswith(("def ", "async def "))
+                    )
+                    continue
+                for node in ast.walk(tree):
+                    if isinstance(node, (ast.Import, ast.ImportFrom)):
+                        imports += 1
+                    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        functions += 1
+        gate_map = record.payload.get("gates")
+        if isinstance(gate_map, Mapping):
+            gates = max(gates, len(gate_map))
+    return max(1, len(files)), imports, functions, gates
 
 
 class MeraGraph:
@@ -96,12 +141,14 @@ class MeraGraph:
         self.sink = sink
         self.db_path = str(db_path)
         self.backend = backend or ClassicalSVDBackend()
+        self.analogies = AnalogicalMatcher()
         self._lock = threading.RLock()
         if self.db_path != ":memory:":
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path, isolation_level=None, check_same_thread=False)
         with self._lock:
             self._conn.executescript(_SCHEMA)
+        self._load_analogies()
 
     def put_node(
         self,
@@ -123,6 +170,60 @@ class MeraGraph:
             )
         return digest
 
+    def _load_analogies(self) -> None:
+        for node in self.nodes(kind="analogy"):
+            payload = node["payload"]
+            pattern_id = str(payload.get("pattern_id") or node["hash"])
+            signature = StructuralSignature.from_payload(payload.get("signature", {}))
+            self.analogies.register(
+                pattern_id,
+                signature,
+                str(payload.get("strategy_hint", "")),
+                payload.get("metadata", {}),
+            )
+
+    def encode_signature(
+        self,
+        coupling_matrix: Any,
+        *,
+        num_modules: int,
+        num_imports: int,
+        num_functions: int,
+        num_gates: int,
+    ) -> StructuralSignature:
+        """Encode a coordinate-free structural fingerprint for analogical recall."""
+        return self.analogies.encode(
+            coupling_matrix,
+            num_modules=num_modules,
+            num_imports=num_imports,
+            num_functions=num_functions,
+            num_gates=num_gates,
+        )
+
+    def register_analogy(
+        self,
+        pattern_id: str,
+        signature: StructuralSignature,
+        strategy_hint: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> str:
+        """Persist an L1/L2 strategy alongside its structural signature."""
+        payload = {
+            "pattern_id": pattern_id,
+            "signature": signature.as_dict(),
+            "strategy_hint": strategy_hint,
+            "metadata": dict(metadata or {}),
+        }
+        digest = self.put_node("analogy", payload, scale=2, weight=1.0)
+        self.analogies.register(pattern_id, signature, strategy_hint, metadata)
+        return digest
+
+    def best_analogy(
+        self, signature: StructuralSignature, min_similarity: float = 0.72
+    ) -> AnalogyMatch | None:
+        """Recall the closest structural strategy learned in any repository."""
+        return self.analogies.best_match(signature, min_similarity=min_similarity)
+
     def link(self, src: str, dst: str, relation: str, weight: float = 1.0) -> None:
         with self._lock:
             self._conn.execute(
@@ -143,7 +244,12 @@ class MeraGraph:
         records = self.sink.records(kinds=kinds, scale=scale, min_eta=min_eta, limit=limit)
         if len(records) < 2:
             return CoarseGrainReport(
-                scale=scale, records=len(records), features=0, clusters=0, skipped="need >= 2 traces"
+                scale=scale,
+                records=len(records),
+                features=0,
+                clusters=0,
+                skipped="need >= 2 traces",
+                analogies=0,
             )
 
         vocabulary = sorted({feature for record in records for feature in _features(record)})
@@ -154,6 +260,7 @@ class MeraGraph:
                 features=len(vocabulary),
                 clusters=0,
                 skipped="feature matrix is degenerate",
+                analogies=0,
             )
         index = {feature: position for position, feature in enumerate(vocabulary)}
         matrix = np.zeros((len(records), len(vocabulary)), dtype=np.float64)
@@ -162,6 +269,14 @@ class MeraGraph:
                 matrix[row, index[feature]] = 1.0
 
         report = self.backend.measure_entanglement(matrix, chi_max=chi_max, tau=tau)
+        num_modules, num_imports, num_functions, num_gates = _motif_counts(records)
+        signature = self.encode_signature(
+            matrix,
+            num_modules=num_modules,
+            num_imports=num_imports,
+            num_functions=num_functions,
+            num_gates=num_gates,
+        )
         k = max(1, min(int(report.effective_rank) or 1, len(records) - 1, chi_max))
         # Honour both halves of the backend contract; do not bypass the seam with
         # a hard-coded numpy decomposition.
@@ -182,6 +297,7 @@ class MeraGraph:
 
         rule_hashes: list[str] = []
         support_total = 0
+        analogy_count = 0
         for members in buckets.values():
             if len(members) < 2:
                 continue
@@ -189,13 +305,16 @@ class MeraGraph:
             pattern = sorted(feature for feature, count in shared.items() if count == len(members))
             directives = Counter(str(member.payload.get("directive", "")) for member in members)
             etas = [member.eta_cog for member in members if member.eta_cog is not None]
+            strategy_hint = directives.most_common(1)[0][0] if directives else ""
             payload = {
                 "pattern": pattern,
                 "support": len(members),
                 "eta_mean": round(float(np.mean(etas)), 6) if etas else None,
-                "directive": directives.most_common(1)[0][0] if directives else "",
+                "directive": strategy_hint,
                 "members": [member.hash for member in members],
                 "source_scale": scale,
+                "structural_signature": signature.as_dict(),
+                "strategy_hint": strategy_hint,
             }
             digest = self.put_node(
                 "rule",
@@ -206,6 +325,18 @@ class MeraGraph:
             )
             rule_hashes.append(digest)
             support_total += len(members)
+            self.register_analogy(
+                digest,
+                signature,
+                strategy_hint,
+                metadata={
+                    "source_scale": scale,
+                    "support": len(members),
+                    "pattern": list(pattern),
+                    "eta_mean": payload["eta_mean"],
+                },
+            )
+            analogy_count += 1
             for member in members:
                 self.link(member.hash, digest, "absorbed_by", 1.0 / len(members))
 
@@ -231,10 +362,13 @@ class MeraGraph:
             rules=tuple(rule_hashes),
             truncation_error=report.truncation_error,
             spectral_entropy_bits=report.spectral_entropy_bits,
+            analogies=analogy_count,
         )
 
     def nodes(self, scale: int | None = None, kind: str | None = None) -> list[dict[str, Any]]:
-        sql = "SELECT hash, scale, kind, payload, parent_hash, eta_cog, weight FROM nodes WHERE 1=1"
+        sql = (
+            "SELECT hash, scale, kind, payload, parent_hash, eta_cog, weight, created_at FROM nodes WHERE 1=1"
+        )
         params: list[Any] = []
         if scale is not None:
             sql += " AND scale = ?"
@@ -254,6 +388,7 @@ class MeraGraph:
                 "parent_hash": row[4],
                 "eta_cog": row[5],
                 "weight": row[6],
+                "created_at": row[7],
             }
             for row in rows
         ]

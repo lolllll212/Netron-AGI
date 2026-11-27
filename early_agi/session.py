@@ -24,6 +24,7 @@ from typing import Any
 from .core.coupling import Constraint, CouplingMatrix, RepoGraph, RepoScanner
 from .core.governor import CognitiveStepCost, Directive
 from .core.kernel import EarlyAGIKernel, ShiftArtifact, TickResult
+from .core.plasticity import UserCoAdapter
 from .llm.router import Edit, Router, TurnProposal, is_safe_relative
 from .memory.mera_graph import MeraGraph
 from .memory.reflex import CompiledReflex, ReflexCompileReport, ReflexLibrary, content_sha
@@ -50,6 +51,10 @@ class TurnOutcome:
     reflex: str = ""
     rejected: tuple[Mapping[str, Any], ...] = ()
     cost: Mapping[str, Any] | None = None
+    user_profile: Mapping[str, Any] | None = None
+    analogy: Mapping[str, Any] | None = None
+    plasticity: Mapping[str, Any] | None = None
+    probe: Mapping[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         out = {
@@ -71,6 +76,14 @@ class TurnOutcome:
         }
         if self.cost is not None:
             out["cost"] = dict(self.cost)
+        if self.user_profile is not None:
+            out["user_profile"] = dict(self.user_profile)
+        if self.analogy is not None:
+            out["analogy"] = dict(self.analogy)
+        if self.plasticity is not None:
+            out["plasticity"] = dict(self.plasticity)
+        if self.probe is not None:
+            out["probe"] = dict(self.probe)
         return out
 
 
@@ -88,6 +101,10 @@ class AgentSession:
         reflexes: ReflexLibrary | None = None,
         max_brief_files: int = 40,
         max_brief_source_chars: int = 4000,
+        user_model: UserCoAdapter | None = None,
+        mera: MeraGraph | None = None,
+        plasticity: bool | None = None,
+        probe_calls: Sequence[tuple[str, Mapping[str, Any]]] | None = None,
     ) -> None:
         self.root = Path(root).resolve()
         self.kernel = kernel
@@ -100,12 +117,25 @@ class AgentSession:
         self.max_brief_files = max_brief_files
         self.max_brief_source_chars = max_brief_source_chars
         self.history: list[TurnOutcome] = []
+        self.user_model = user_model or UserCoAdapter()
+        self.user_model.replay(self.kernel.sink.records(kinds=("user_feedback",)))
+        self.mera = mera or (
+            self.reflexes.graph
+            if self.reflexes is not None
+            else MeraGraph(self.kernel.sink, backend=kernel.backend)
+        )
+        self.plasticity = bool(kernel.plasticity if plasticity is None else plasticity)
+        if self.plasticity and not self.kernel.governor.plasticity_enabled:
+            self.kernel.plasticity = True
+            self.kernel.governor.enable_plasticity(base_tau=self.kernel.tau, base_chi_max=self.kernel.chi_max)
+        self.probe_calls = tuple(probe_calls or (("inspect_deps", {}),))
 
     # -- public -------------------------------------------------------------
-    def turn(self, task: str) -> TurnOutcome:
+    def turn(self, task: str, *, user_overrode: bool = False) -> TurnOutcome:
         graph = self.scanner.scan()
         coupling = graph.coupling(self.constraints)
-        brief = self._brief(task, graph, coupling)
+        plasticity_info = self._prepare_plasticity(task, graph, coupling)
+        brief = self._brief(task, graph, coupling, plasticity_info)
         kernel_checkpoint = self.kernel.checkpoint()
         registry = self.kernel.registry
         registry_checkpoint = registry.snapshot() if registry is not None else None
@@ -156,7 +186,15 @@ class AgentSession:
                     if registry is not None and registry_checkpoint is not None:
                         registry.restore_checkpoint(registry_checkpoint)
                     self._archive_failure(task, proposal, write_error)
-                    return self._failure_outcome(coupling, proposal, snapshots, write_error)
+                    return self._failure_outcome(
+                        coupling,
+                        proposal,
+                        snapshots,
+                        write_error,
+                        task=task,
+                        user_overrode=user_overrode,
+                        plasticity_info=plasticity_info,
+                    )
                 if not snapshots_ok:  # pragma: no cover - defensive; except returns above
                     raise RuntimeError("unreachable snapshot state")
 
@@ -179,6 +217,10 @@ class AgentSession:
             gate_results=gate_results,
             verified_drop=verified_drop,
             commit_gate_state=False,
+            predicted_drop=float(plasticity_info.get("predicted_drop", 0.0)),
+            analogy_similarity=float(plasticity_info.get("analogy_similarity", 0.0)),
+            risk_level=float(plasticity_info.get("risk_level", 0.5)),
+            probe_completed=bool(plasticity_info.get("probe_completed", False)),
         )
 
         reverted_this_turn = False
@@ -232,12 +274,133 @@ class AgentSession:
             reflex=reflex.name if reflex is not None else "",
             rejected=proposal.rejected if proposal else (),
             cost=cost.as_dict(),
+            user_profile=plasticity_info.get("user_profile"),
+            analogy=plasticity_info.get("analogy"),
+            plasticity=plasticity_info.get("plasticity"),
+            probe=plasticity_info.get("probe"),
         )
+        outcome = self._finalize_outcome(outcome, task=task, user_overrode=user_overrode)
         self.history.append(outcome)
         return outcome
 
+    # -- plasticity ---------------------------------------------------------
+    def _prepare_plasticity(self, task: str, graph: RepoGraph, coupling: CouplingMatrix) -> dict[str, Any]:
+        """Compute live thresholds, structural analogy, and read-only probes."""
+        del task  # the adapter uses prompt length from the finalised outcome
+        profile = self.user_model.profile()
+        setter = getattr(self.router, "set_user_profile", None)
+        if callable(setter):
+            setter(profile)
+        neutral = {
+            "user_profile": profile.as_dict(),
+            "analogy": None,
+            "strategy_hint": "",
+            "analogy_similarity": 0.0,
+            "risk_level": 0.5,
+            "thresholds": None,
+            "plasticity": None,
+            "probe": None,
+            "predicted_drop": 0.0,
+            "probe_completed": False,
+        }
+        if not self.plasticity:
+            return neutral
+
+        modules = graph.modules.values()
+        num_modules = max(1, len(graph.modules))
+        num_imports = sum(len(info.imports) for info in modules)
+        num_functions = sum(len(info.functions) for info in modules)
+        num_gates = len(self.kernel.gates)
+        signature = self.mera.encode_signature(
+            coupling.matrix,
+            num_modules=num_modules,
+            num_imports=num_imports,
+            num_functions=num_functions,
+            num_gates=num_gates,
+        )
+        analogy = self.mera.best_analogy(signature, min_similarity=0.60)
+        analogy_similarity = analogy.similarity if analogy is not None else 0.0
+        risk_level = 0.8 if profile.probe_before_edit else 0.5
+        thresholds = self.kernel.governor.modulate(analogy_similarity, risk_level)
+        previous_drops = self.kernel.governor.drops
+        predicted_drop = 0.0
+        if analogy is not None:
+            predicted_drop = float(analogy.metadata.get("eta_mean", 0.0) or 0.0)
+        elif previous_drops:
+            predicted_drop = float(previous_drops[-1])
+
+        probe: dict[str, Any] | None = None
+        probe_completed = False
+        if self.kernel.governor.probe_pending:
+            registry = self.kernel.registry
+            if registry is not None:
+                probe = registry.epistemic_probe(self.probe_calls)
+            probe_completed = True
+            self.kernel.governor.clear_probe()
+            self.kernel.release_probe_lock()
+            # Read-only measurements collapse part of the ambiguity; tighten.
+            risk_level = 0.5
+            thresholds = self.kernel.governor.modulate(max(0.5, analogy_similarity), risk_level)
+
+        return {
+            "user_profile": profile.as_dict(),
+            "analogy": analogy.as_dict() if analogy is not None else None,
+            "strategy_hint": analogy.strategy_hint if analogy is not None else "",
+            "analogy_similarity": analogy_similarity,
+            "risk_level": risk_level,
+            "thresholds": thresholds.as_dict(),
+            "plasticity": {
+                "enabled": True,
+                "thresholds": thresholds.as_dict(),
+                "surprise_ema": round(self.kernel.governor.regulator.surprise_ema, 6),
+                "novelty_score": thresholds.novelty_score,
+                "probe_first": probe is not None,
+            },
+            "probe": probe,
+            "predicted_drop": predicted_drop,
+            "probe_completed": probe_completed,
+        }
+
+    def _finalize_outcome(self, outcome: TurnOutcome, *, task: str, user_overrode: bool) -> TurnOutcome:
+        edits_accepted = bool(outcome.applied and not outcome.reverted)
+        was_reverted = bool(outcome.reverted)
+        rejected_edits = len(outcome.rejected)
+        self.user_model.record_turn(
+            prompt_text=task,
+            edits_accepted=edits_accepted,
+            was_reverted=was_reverted,
+            user_overrode=user_overrode,
+            rejected_edits=rejected_edits,
+        )
+        profile = self.user_model.profile()
+        self.kernel.sink.put(
+            "user_feedback",
+            {
+                "prompt_text": task,
+                "edits_accepted": edits_accepted,
+                "was_reverted": was_reverted,
+                "user_overrode": bool(user_overrode),
+                "rejected_edits": rejected_edits,
+                "accept_rate": profile.accept_rate,
+                "patch_granularity": profile.patch_granularity,
+                "rationale_style": profile.rationale_style,
+            },
+            scale=0,
+            parent_hash=outcome.hash or None,
+        )
+        setter = getattr(self.router, "set_user_profile", None)
+        if callable(setter):
+            setter(profile)
+        return replace(outcome, user_profile=profile.as_dict())
+
     # -- brief --------------------------------------------------------------
-    def _brief(self, task: str, graph: RepoGraph, coupling: CouplingMatrix) -> dict[str, Any]:
+    def _brief(
+        self,
+        task: str,
+        graph: RepoGraph,
+        coupling: CouplingMatrix,
+        plasticity: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         report = coupling.report(self.kernel.chi_max, self.kernel.tau)
         files = [info.path for info in graph.modules.values()]
         coupled = [name for name, _ in coupling.top_rows(k=8)]
@@ -275,6 +438,11 @@ class AgentSession:
             "lock_reason": self.kernel.lock_reason,
             "satisfied_gates": sorted(self.kernel.satisfied_gates),
             "governor": self.kernel.governor.snapshot(),
+            "user_model": (plasticity or {}).get("user_profile"),
+            "analogy": (plasticity or {}).get("analogy"),
+            "strategy_hint": (plasticity or {}).get("strategy_hint", ""),
+            "plasticity": (plasticity or {}).get("plasticity"),
+            "probe": (plasticity or {}).get("probe"),
         }
 
     def _state(self, task: str, graph: RepoGraph, coupling: CouplingMatrix) -> dict[str, Any]:
@@ -296,7 +464,7 @@ class AgentSession:
     def compile_reflexes(self, *, min_support: int = 2) -> ReflexCompileReport:
         """Phase-3 consolidation. Off the hot path: call it between turns."""
         if self.reflexes is None:
-            self.reflexes = ReflexLibrary(MeraGraph(self.kernel.sink))
+            self.reflexes = ReflexLibrary(self.mera)
         return self.reflexes.compile(min_support=min_support)
 
     def _archive_edits(
@@ -362,6 +530,10 @@ class AgentSession:
         proposal: TurnProposal,
         snapshots: Mapping[str, bytes | None],
         error: str,
+        *,
+        task: str = "",
+        user_overrode: bool = False,
+        plasticity_info: Mapping[str, Any] | None = None,
     ) -> TurnOutcome:
         report = coupling.report(self.kernel.chi_max, self.kernel.tau)
         rejected = (*proposal.rejected, {"reason": "transactional write failed", "detail": error[:500]})
@@ -386,7 +558,12 @@ class AgentSession:
                 pruned_branches=len(rejected),
                 latency_ms=proposal.latency_ms,
             ).as_dict(),
+            user_profile=(plasticity_info or {}).get("user_profile"),
+            analogy=(plasticity_info or {}).get("analogy"),
+            plasticity=(plasticity_info or {}).get("plasticity"),
+            probe=(plasticity_info or {}).get("probe"),
         )
+        outcome = self._finalize_outcome(outcome, task=task, user_overrode=user_overrode)
         self.history.append(outcome)
         return outcome
 

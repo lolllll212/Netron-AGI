@@ -79,6 +79,12 @@ _EXECUTION_FIELDS = frozenset(
         "violations",
         "workspace",
         "eta",
+        "analogy",
+        "analogy_similarity",
+        "predicted_drop",
+        "probe_results",
+        "novelty_score",
+        "plasticity",
     }
 )
 
@@ -89,6 +95,7 @@ _RESULT_FIELDS = frozenset(
         "mera",
         "reflexes",
         "synthesis",
+        "plasticity",
     }
 )
 
@@ -245,6 +252,7 @@ class GaugeVM:
         self.result.tick = {}
         self.result.mera = {}
         self.result.reflexes = {}
+        self.result.plasticity = dict(execution.plasticity)
 
     # -- public -------------------------------------------------------------
     def run(
@@ -280,6 +288,7 @@ class GaugeVM:
                 self.execution.gate_state_committed = True
             self.execution.status = "halted"
             self.result.reflexes = self._compile_hot_chains()
+            self.result.plasticity = dict(self.execution.plasticity)
         except Exception as exc:
             self.execution.status = "error"
             self.violate(f"{type(exc).__name__}: {exc}")
@@ -310,6 +319,7 @@ class GaugeVM:
             self.result.synthesis = self.execution.synthesis_events
             self.result.collapses = self.execution.collapses
             self.result.recalled = self.execution.recalled
+            self.result.plasticity = dict(self.execution.plasticity)
         return self.result
 
     def execute(self, instruction: Instruction) -> None:

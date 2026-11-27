@@ -1,8 +1,10 @@
-"""The early-AGI kernel: one tick, three directives, no escape hatches.
+"""The early-AGI kernel: one tick, adaptive directives, no escape hatches.
 
 A tick is deterministic and reproducible: export pruned branches, measure
 entanglement, run the dark-state gates, ask the governor for a directive,
-archive the state. Nothing in here calls a model; the router feeds it.
+archive the state. Nothing in here calls a model; the router feeds it. Plasticity
+is opt-in and can request a read-only ``EPISTEMIC_PROBE`` before the first
+mutation.
 """
 
 from __future__ import annotations
@@ -25,13 +27,16 @@ from .governor import CognitiveStepCost, Directive, ThermodynamicGovernor
 
 __all__ = [
     "SHIFT_KINDS",
+    "Directive",
     "EarlyAGIKernel",
+    "KernelDirective",
     "ShiftArtifact",
     "TickResult",
     "validate_shift_artifact",
 ]
 
 SHIFT_KINDS = ("decomposition", "invariant", "new_operator")
+KernelDirective = Directive
 
 
 @dataclass(frozen=True)
@@ -380,6 +385,7 @@ class EarlyAGIKernel:
         tau: float = 0.15,
         scale: int = 0,
         lock_writes_on_shift: bool = True,
+        plasticity: bool = False,
     ) -> None:
         self.sink = sink
         self.backend = backend or ClassicalSVDBackend()
@@ -390,6 +396,9 @@ class EarlyAGIKernel:
         self.tau = tau
         self.scale = scale
         self.lock_writes_on_shift = lock_writes_on_shift
+        self.plasticity = bool(plasticity)
+        if self.plasticity:
+            self.governor.enable_plasticity(base_tau=self.tau, base_chi_max=self.chi_max)
 
         self.last_hash: str | None = None
         self.satisfied_gates: set[str] = set()
@@ -423,6 +432,11 @@ class EarlyAGIKernel:
         self._lock_reason = ""
         if self.registry is not None:
             self.registry.release_writes()
+
+    def release_probe_lock(self) -> None:
+        """Unlock writes after a caller has completed read-only epistemic probes."""
+        if self._lock_reason.startswith("EPISTEMIC_PROBE"):
+            self._release_lock()
 
     def evaluate_gates(self, candidate_state: Mapping[str, Any]) -> tuple[dict[str, GateResult], float]:
         """Run gates once without mutating kernel state; the tick commits them."""
@@ -466,6 +480,9 @@ class EarlyAGIKernel:
                 "shift_streak": self.governor.shift_streak,
                 "recall_streak": self.governor.recall_streak,
             },
+            "plasticity": self.governor.plasticity_snapshot(),
+            "chi_max": self.chi_max,
+            "tau": self.tau,
         }
 
     def restore_checkpoint(self, checkpoint: Mapping[str, Any]) -> None:
@@ -483,6 +500,11 @@ class EarlyAGIKernel:
         self.governor.directives = list(gov.get("directives", ()))
         self.governor.shift_streak = int(gov.get("shift_streak", 0))
         self.governor.recall_streak = int(gov.get("recall_streak", 0))
+        plasticity = checkpoint.get("plasticity")
+        if isinstance(plasticity, Mapping):
+            self.governor.restore_plasticity(plasticity)
+        self.chi_max = int(checkpoint.get("chi_max", self.chi_max))
+        self.tau = float(checkpoint.get("tau", self.tau))
         if self.registry is not None:
             if self._writes_locked:
                 self.registry.isolate_writes(reason=self._lock_reason)
@@ -504,6 +526,10 @@ class EarlyAGIKernel:
         eta_cog: float | None = None,
         governor_directive: Directive | None = None,
         commit_gate_state: bool = True,
+        predicted_drop: float | None = None,
+        analogy_similarity: float = 0.0,
+        risk_level: float = 0.5,
+        probe_completed: bool = False,
     ) -> TickResult:
         cost = cost or CognitiveStepCost()
         matrix = np.asarray(coupling_matrix, dtype=np.float64)
@@ -520,6 +546,7 @@ class EarlyAGIKernel:
             )
             self.pruned_branches += 1
 
+        entanglement_measured = entanglement is None
         if entanglement is None:
             entanglement = self.backend.measure_entanglement(matrix, self.chi_max, self.tau)
         if gate_results is None or verified_drop is None:
@@ -528,6 +555,21 @@ class EarlyAGIKernel:
             gate_results = dict(gate_results)
             if commit_gate_state:
                 self.apply_gate_results(gate_results)
+
+        thresholds = self.governor.modulate(
+            analogy_similarity,
+            risk_level,
+            predicted_drop=predicted_drop,
+            verified_drop=verified_drop,
+        )
+        if probe_completed:
+            self.governor.clear_probe()
+            thresholds = self.governor.last_thresholds or thresholds
+        if self.governor.plasticity_enabled:
+            self.tau = thresholds.tau
+            self.chi_max = thresholds.chi_max
+            if entanglement_measured:
+                entanglement = self.backend.measure_entanglement(matrix, self.chi_max, self.tau)
         if eta_cog is None or governor_directive is None:
             eta_cog, governor_directive = self.governor.evaluate(verified_drop, cost, entanglement)
 
@@ -548,6 +590,8 @@ class EarlyAGIKernel:
                 shift_held = True
         elif governor_directive is Directive.SHIFT_COORDINATE and self.lock_writes_on_shift:
             self._engage_lock(f"SHIFT_COORDINATE (eta={eta_cog:.2f})")
+        elif governor_directive is Directive.EPISTEMIC_PROBE and self.lock_writes_on_shift:
+            self._engage_lock("EPISTEMIC_PROBE (read-only measurements only)")
 
         payload = {
             "label": label,
@@ -564,6 +608,13 @@ class EarlyAGIKernel:
             "shift_held": shift_held,
             "writes_locked": self._writes_locked,
             "scale": self.scale,
+            "plasticity": {
+                "enabled": self.governor.plasticity_enabled,
+                "thresholds": thresholds.as_dict(),
+                "analogy_similarity": round(float(analogy_similarity), 4),
+                "risk_level": round(float(risk_level), 4),
+                "surprise_ema": round(self.governor.regulator.surprise_ema, 6),
+            },
         }
         self.last_hash = self.sink.put(
             "uv_state", payload, scale=self.scale, parent_hash=self.last_hash, eta_cog=eta_cog
@@ -648,5 +699,13 @@ class EarlyAGIKernel:
             "coordinate_shifts": self.coordinate_shifts,
             "pruned_branches": self.pruned_branches,
             "governor": self.governor.snapshot(),
+            "plasticity": {
+                "enabled": self.governor.plasticity_enabled,
+                "chi_max": self.chi_max,
+                "tau": self.tau,
+                "thresholds": (
+                    self.governor.last_thresholds.as_dict() if self.governor.last_thresholds else None
+                ),
+            },
             "sink": self.sink.stats(),
         }
