@@ -17,7 +17,9 @@ from pathlib import Path
 from typing import Any
 
 __all__ = [
+    "EPISTEMIC_PROBE",
     "READ",
+    "READ_ONLY_KINDS",
     "VERIFY",
     "WILDCARD",
     "WRITE",
@@ -33,6 +35,8 @@ WILDCARD = "*"
 READ = "read"
 WRITE = "write"
 VERIFY = "verify"
+READ_ONLY_KINDS = frozenset({READ, VERIFY})
+EPISTEMIC_PROBE = "EPISTEMIC_PROBE"
 
 
 class WriteLocked(RuntimeError):
@@ -105,7 +109,7 @@ class OperatorSpec:
 
     @property
     def mutates(self) -> bool:
-        return self.kind == WRITE or bool(self.writes)
+        return str(self.kind).casefold() == WRITE or bool(self.writes)
 
 
 @dataclass(frozen=True)
@@ -147,6 +151,18 @@ class OperatorRegistry:
         self._seq = 0
         self.turn = 0
         self._lock_reason: str = ""
+        self._directive: str = ""
+
+    @property
+    def active_directive(self) -> str:
+        """Current kernel directive, if any, constraining operator selection."""
+        return self._directive
+
+    def set_directive(self, directive: str) -> None:
+        self._directive = str(directive)
+
+    def clear_directive(self) -> None:
+        self._directive = ""
 
     def register(self, spec: OperatorSpec) -> OperatorSpec:
         if not spec.name:
@@ -212,12 +228,14 @@ class OperatorRegistry:
                 ("check_z3", {"smt2": "(check-sat)", "timeout_ms": 1000}),
             )
         previous = self._lock_reason
+        previous_directive = self._directive
         self.isolate_writes(reason="EPISTEMIC_PROBE (read-only measurements only)")
+        self.set_directive(EPISTEMIC_PROBE)
         results: list[dict[str, Any]] = []
         try:
             for name, kwargs in calls:
                 spec = self.operator(name)
-                if spec.mutates:
+                if spec.mutates or str(spec.kind).casefold() not in READ_ONLY_KINDS:
                     results.append({"operator": name, "skipped": "mutating operator"})
                     continue
                 try:
@@ -233,6 +251,7 @@ class OperatorRegistry:
                     results.append({"operator": name, "ok": False, "error": f"{type(exc).__name__}: {exc}"})
         finally:
             self._lock_reason = previous
+            self._directive = previous_directive
         return {"operators": [name for name, _ in calls], "results": results}
 
     def snapshot(self) -> dict[str, Any]:
@@ -242,6 +261,7 @@ class OperatorRegistry:
             "seq": self._seq,
             "log": list(self._log),
             "lock_reason": self._lock_reason,
+            "directive": self._directive,
         }
 
     def restore_checkpoint(self, checkpoint: Mapping[str, Any]) -> None:
@@ -249,6 +269,7 @@ class OperatorRegistry:
         self._seq = int(checkpoint.get("seq", 0))
         self._log = list(checkpoint.get("log", ()))
         self._lock_reason = str(checkpoint.get("lock_reason", ""))
+        self._directive = str(checkpoint.get("directive", ""))
 
     def apply(self, name: str, /, **kwargs: Any) -> Any:
         spec = self.operator(name)
@@ -257,6 +278,10 @@ class OperatorRegistry:
         if spec.mutates and self.writes_locked:
             self._record(spec, targets, ok=False, blocked=True, detail=self._lock_reason)
             raise WriteLocked(f"operator {name!r} is mutating but writes are isolated: {self._lock_reason}")
+        if self._directive == EPISTEMIC_PROBE and str(spec.kind).casefold() not in READ_ONLY_KINDS:
+            detail = f"{EPISTEMIC_PROBE} allows only READ/VERIFY operators"
+            self._record(spec, targets, ok=False, blocked=True, detail=detail)
+            raise WriteLocked(f"operator {name!r} is blocked: {detail}")
 
         started = time.perf_counter()
         try:
@@ -272,7 +297,7 @@ class OperatorRegistry:
             )
             raise
         ok: bool | None = True
-        if spec.kind == VERIFY:
+        if str(spec.kind).casefold() == VERIFY:
             ok = _verifier_ok(result)
         self._record(
             spec,

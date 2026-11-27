@@ -145,6 +145,7 @@ class Settings:
     extra: dict[str, Any] = field(default_factory=dict)
     # Appended so existing positional Settings(...) constructions keep their meaning.
     backend: str = "classical_svd"
+    directive_path: str = ":memory:"
 
     @classmethod
     def from_env(
@@ -178,6 +179,7 @@ class Settings:
             chi_max=_int(source, "EARLY_AGI_CHI_MAX", 4, minimum=1, maximum=256),
             tau=_float(source, "EARLY_AGI_TAU", 0.15, minimum=1e-9, maximum=1.0),
             backend=_str(source, "EARLY_AGI_BACKEND", "classical_svd"),
+            directive_path=_str(source, "EARLY_AGI_DIRECTIVE_DB", ":memory:"),
             eta_high=_float(source, "EARLY_AGI_ETA_HIGH", 1.2, minimum=0.0),
             eta_min=_float(source, "EARLY_AGI_ETA_MIN", 0.15, minimum=0.0),
             sink_path=_str(source, "EARLY_AGI_SINK", ":memory:"),
@@ -269,6 +271,7 @@ _KNOWN_ENV = frozenset(
         "EARLY_AGI_CHI_MAX",
         "EARLY_AGI_TAU",
         "EARLY_AGI_BACKEND",
+        "EARLY_AGI_DIRECTIVE_DB",
         "EARLY_AGI_ETA_HIGH",
         "EARLY_AGI_ETA_MIN",
         "EARLY_AGI_SINK",

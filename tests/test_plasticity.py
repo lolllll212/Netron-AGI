@@ -80,7 +80,12 @@ def test_homeostatic_regulator_adapts_six_thresholds() -> None:
         "chi_max",
         "should_probe_first",
         "novelty_score",
+        "exploration_patience",
+        "crystallization_bias",
+        "prefer_crystallize",
     }
+    assert thresholds.exploration_patience > 0
+    assert thresholds.prefer_crystallize is False
     assert regulator.snapshot()["surprise_ema"] > 0.0
 
 

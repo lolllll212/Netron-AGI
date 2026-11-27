@@ -108,6 +108,7 @@ class GaugeExecutionState:
         self.predicted_drop = 0.0
         self.probe_results: list[dict[str, Any]] = []
         self.novelty_score = 0.0
+        self.distilled_constraints: list[str] = []
         self.plasticity: dict[str, Any] = {}
 
     def scan_workspace(self) -> WorkspaceView:
@@ -180,6 +181,7 @@ class GaugeExecutionState:
             "predicted_drop": self.predicted_drop,
             "novelty_score": self.novelty_score,
             "probe_results": list(self.probe_results),
+            "distilled_constraints": list(self.distilled_constraints),
             "plasticity": dict(self.plasticity),
         }
         workspace = self.view()

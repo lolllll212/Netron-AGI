@@ -15,6 +15,7 @@ from typing import Any
 from ..backends import get_backend
 from ..config import Settings
 from ..core.cold_sink import ColdSink
+from ..core.governor import Directive
 from ..core.kernel import EarlyAGIKernel
 from ..memory.mera_graph import MeraGraph
 from ..memory.reflex import ReflexLibrary
@@ -49,6 +50,7 @@ _EXECUTION_FIELDS = frozenset(
         "coupling_fingerprint",
         "coupling_matrix",
         "directive",
+        "distilled_constraints",
         "drag",
         "entanglement",
         "events",
@@ -121,6 +123,16 @@ _DELEGATED_METHODS = frozenset(
         "view",
     }
 )
+
+_PROBE_NOVELTY_THRESHOLD = 0.65
+
+
+def _walk_instructions(instruction: Instruction) -> list[Instruction]:
+    """Flatten nested trap bodies so preflight can find a PROBE plan."""
+    found = [instruction]
+    for child in instruction.body:
+        found.extend(_walk_instructions(child))
+    return found
 
 
 class GaugeVM:
@@ -277,10 +289,16 @@ class GaugeVM:
             self.synthesizer.eta_min = self.kernel.governor.eta_min
 
         try:
-            for instruction in ir.instructions():
+            instructions = ir.instructions()
+            setup_count = len(ir.setup)
+            for index, instruction in enumerate(instructions):
                 if self.execution.halted:
                     break
                 self.execute(instruction)
+                # Setup registered the extern operators and plastic thresholds;
+                # emit EPISTEMIC_PROBE before the first body OP_APPLY can write.
+                if index + 1 == setup_count:
+                    self._preflight_probe(ir)
             if not self.execution.collapses:
                 self.violate("program halted with an uncollapsed manifold leak into the sink")
             if not self.execution.gate_state_committed and self.execution.gate_results:
@@ -325,6 +343,48 @@ class GaugeVM:
     def execute(self, instruction: Instruction) -> None:
         """Dispatch exactly one instruction to the focused opcode runner."""
         self.opcodes.execute(instruction)
+
+    @staticmethod
+    def _probe_plan(ir: ProgramIR) -> Instruction | None:
+        for instruction in ir.instructions():
+            for nested in _walk_instructions(instruction):
+                if nested.op == "PROBE":
+                    return nested
+        return None
+
+    def _preflight_probe(self, ir: ProgramIR) -> None:
+        """Emit EPISTEMIC_PROBE ahead of CRYSTALLIZE and every mutating op."""
+        if not self.kernel.plasticity or self.execution.probe_results:
+            return
+        thresholds = self.kernel.governor.last_thresholds
+        if thresholds is None or thresholds.novelty_score <= _PROBE_NOVELTY_THRESHOLD:
+            return
+        plan = self._probe_plan(ir)
+        if plan is None:
+            return
+        ops = [str(item) for item in plan.args.get("ops", ())]
+        if not ops:
+            return
+        self.execution.directive = Directive.EPISTEMIC_PROBE
+        self.kernel.engage_probe_lock()
+        self.emit(
+            "EPISTEMIC_PROBE",
+            {
+                "phase": "preflight",
+                "novelty_score": thresholds.novelty_score,
+                "operators": ops,
+                "writes_locked": True,
+            },
+        )
+        args = {**plan.args, "preflight": True}
+        self.execute(Instruction("PROBE", args, (), plan.span))
+        self.execution.plasticity["preflight_probe"] = {
+            "directive": Directive.EPISTEMIC_PROBE.value,
+            "operators": ops,
+            "results": len(self.execution.probe_results),
+            "novelty_score": thresholds.novelty_score,
+        }
+        self.result.plasticity = dict(self.execution.plasticity)
 
     # -- thin helpers -------------------------------------------------------
     def _reset(self, name: str) -> None:

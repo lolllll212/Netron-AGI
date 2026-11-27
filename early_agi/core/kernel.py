@@ -426,12 +426,19 @@ class EarlyAGIKernel:
         self._lock_reason = reason
         if self.registry is not None:
             self.registry.isolate_writes(reason=reason)
+            if reason.startswith("EPISTEMIC_PROBE"):
+                self.registry.set_directive(Directive.EPISTEMIC_PROBE.value)
 
     def _release_lock(self) -> None:
         self._writes_locked = False
         self._lock_reason = ""
         if self.registry is not None:
             self.registry.release_writes()
+            self.registry.clear_directive()
+
+    def engage_probe_lock(self) -> None:
+        """Enter the read-only probe directive before any mutating operation."""
+        self._engage_lock("EPISTEMIC_PROBE (read-only measurements only)")
 
     def release_probe_lock(self) -> None:
         """Unlock writes after a caller has completed read-only epistemic probes."""
@@ -508,8 +515,11 @@ class EarlyAGIKernel:
         if self.registry is not None:
             if self._writes_locked:
                 self.registry.isolate_writes(reason=self._lock_reason)
+                if self._lock_reason.startswith("EPISTEMIC_PROBE"):
+                    self.registry.set_directive(Directive.EPISTEMIC_PROBE.value)
             else:
                 self.registry.release_writes()
+                self.registry.clear_directive()
 
     def tick(
         self,
@@ -565,6 +575,10 @@ class EarlyAGIKernel:
         if probe_completed:
             self.governor.clear_probe()
             thresholds = self.governor.last_thresholds or thresholds
+            # A preflight probe already ran; the kernel must not re-lock writes
+            # on the same directive when Gauge advances to EVOLVE/CRYSTALLIZE.
+            if governor_directive is Directive.EPISTEMIC_PROBE:
+                governor_directive = Directive.CRYSTALLIZE
         if self.governor.plasticity_enabled:
             self.tau = thresholds.tau
             self.chi_max = thresholds.chi_max

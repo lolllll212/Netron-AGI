@@ -80,6 +80,7 @@ class ThermodynamicGovernor:
     regulator: HomeostaticRegulator = field(default_factory=HomeostaticRegulator)
     plasticity_enabled: bool = False
     probe_pending: bool = False
+    exploration_budget: int = 0
     last_thresholds: AdaptiveThresholds | None = None
 
     def enable_plasticity(
@@ -113,6 +114,7 @@ class ThermodynamicGovernor:
     ) -> AdaptiveThresholds:
         """Recompute live thresholds; no-op when plasticity is disabled."""
         if not self.plasticity_enabled:
+            self.exploration_budget = 0
             return AdaptiveThresholds(
                 eta_min=round(self.eta_min, 4),
                 eta_high=round(self.eta_high, 4),
@@ -131,6 +133,7 @@ class ThermodynamicGovernor:
         self.eta_min = thresholds.eta_min
         self.eta_high = thresholds.eta_high
         self.probe_pending = thresholds.should_probe_first
+        self.exploration_budget = max(0, int(thresholds.exploration_patience))
         return thresholds
 
     def evaluate(
@@ -171,12 +174,31 @@ class ThermodynamicGovernor:
             verified_entropy_drop <= 0.0 and self.recall_streak >= self.stall_ticks
         ) or regressed_past_floor
 
+        prefer_crystallize = bool(
+            self.plasticity_enabled
+            and self.last_thresholds is not None
+            and self.last_thresholds.prefer_crystallize
+        )
         if stalled:
-            directive = Directive.RECALL_SINK
-            self.shift_streak = 0
-        elif entanglement.is_volume_law or eta_cog < self.eta_high or dragging:
+            if self.exploration_budget > 0 and self.plasticity_enabled:
+                directive = Directive.SHIFT_COORDINATE
+                self.exploration_budget -= 1
+                self.shift_streak += 1
+            else:
+                directive = Directive.RECALL_SINK
+                self.shift_streak = 0
+        elif entanglement.is_volume_law:
             directive = Directive.SHIFT_COORDINATE
             self.shift_streak += 1
+            self.exploration_budget = max(0, self.exploration_budget - 1)
+        elif prefer_crystallize and not dragging and eta_cog >= self.eta_min:
+            directive = Directive.CRYSTALLIZE
+            self.shift_streak = 0
+            self.exploration_budget = 0
+        elif eta_cog < self.eta_high or dragging:
+            directive = Directive.SHIFT_COORDINATE
+            self.shift_streak += 1
+            self.exploration_budget = max(0, self.exploration_budget - 1)
         else:
             directive = Directive.CRYSTALLIZE
             self.shift_streak = 0
@@ -236,6 +258,7 @@ class ThermodynamicGovernor:
             "last_directive": self.directives[-1].value if self.directives else None,
             "plasticity_enabled": self.plasticity_enabled,
             "probe_pending": self.probe_pending,
+            "exploration_budget": self.exploration_budget,
             "surprise_ema": round(self.regulator.surprise_ema, 6),
             "last_thresholds": self.last_thresholds.as_dict() if self.last_thresholds else None,
         }
@@ -244,6 +267,7 @@ class ThermodynamicGovernor:
         return {
             "plasticity_enabled": self.plasticity_enabled,
             "probe_pending": self.probe_pending,
+            "exploration_budget": self.exploration_budget,
             "eta_min": self.eta_min,
             "eta_high": self.eta_high,
             "last_thresholds": self.last_thresholds.as_dict() if self.last_thresholds else None,
@@ -253,6 +277,7 @@ class ThermodynamicGovernor:
     def restore_plasticity(self, snapshot: Mapping[str, Any]) -> None:
         self.plasticity_enabled = bool(snapshot.get("plasticity_enabled", False))
         self.probe_pending = bool(snapshot.get("probe_pending", False))
+        self.exploration_budget = int(snapshot.get("exploration_budget", 0) or 0)
         self.eta_min = float(snapshot.get("eta_min", self.eta_min))
         self.eta_high = float(snapshot.get("eta_high", self.eta_high))
         raw = snapshot.get("last_thresholds")
@@ -268,5 +293,6 @@ class ThermodynamicGovernor:
         self.shift_streak = 0
         self.recall_streak = 0
         self.probe_pending = False
+        self.exploration_budget = 0
         self.last_thresholds = None
         self.regulator.reset()

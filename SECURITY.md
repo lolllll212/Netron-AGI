@@ -23,9 +23,15 @@ The following controls are enabled by default:
   checkpoints, gate state, and registry bookkeeping are rolled back together.
 - Coordinate shifts isolate mutating operators. The lock is checked at the
   registry write boundary, not merely in the planner.
-- `EPISTEMIC_PROBE` isolates writes before crystallisation. Gauge `probe` lists
-  are statically restricted to `deforms(none)` extern ops, and
-  `OperatorRegistry.epistemic_probe()` skips any mutating spec at runtime.
+- `EPISTEMIC_PROBE` isolates writes before crystallisation and before the first
+  mutating Gauge body op. Gauge `probe` lists are statically restricted to
+  `deforms(none)` extern ops; `OperatorRegistry.apply()` allows only READ and
+  read-only VERIFY operators under the directive and blocks file writes.
+  `epistemic_probe()` skips any mutating spec at runtime. Failed pytest/Z3 gates
+  are distilled to one assertion/counterexample on the active manifold, not a
+  raw stack trace in prompt history. The SQLite directive pool, stratified
+  replay, and three-curve benchmark are local: no network or external model is
+  used.
 - Gauge expressions are interpreted by a small tri-state evaluator. Python
   `eval()` is not used.
 - Synthesized operators are AST-restricted, benchmarked in an isolated

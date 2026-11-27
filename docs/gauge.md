@@ -70,17 +70,25 @@ between `predicted_drop` and `verified_drop`, the best analogical similarity,
 and the current risk level into live `eta_min`, `eta_high`, `tau`, `chi_max`,
 novelty, and `should_probe_first` values. `adaptation_rate` sets the surprise
 EMA coefficient. A high-novelty first tick emits `EPISTEMIC_PROBE` before
-`CRYSTALLIZE`; the kernel isolates writes and the read-only `probe` statement
-runs only `extern op` declarations with a `deforms(none)` footprint through
-`OperatorRegistry.epistemic_probe`. Mutating probe operators are rejected by the
-checker and skipped defensively at runtime.
+`CRYSTALLIZE`; the VM also emits a preflight probe after setup but before any
+body `OP_APPLY`, so even compiled mutating setup operators observe the directive
+first. The kernel isolates writes and the read-only `probe` statement runs only
+`extern op` declarations with a `deforms(none)` footprint through
+`OperatorRegistry.epistemic_probe`. Under `EPISTEMIC_PROBE` the registry allows
+READ operators and read-only VERIFY baseline tests only; file writes are blocked
+at `apply()`. Mutating probe operators are rejected by the checker and skipped
+defensively at runtime. A failed pytest/Z3 gate is distilled into one minimal
+assertion or counterexample and appended to `ManifoldState.constraints` for the
+next tick, never pasted as a raw stack trace.
 
 `recall analogy where similarity >= 0.72` encodes the workspace with a
 normalised singular/Schmidt spectrum plus AST motif ratios, then queries MERA
-L1/L2 `analogy` nodes. `coarse_grain()` registers one structural signature per
-promoted rule, so a strategy hint learned in one repository can transfer to a
-differently sized codebase. The best match feeds back into the homeostatic
-thresholds and into `ReflexLibrary.analogical_hint()`.
+L1/L2 `analogy` nodes. `coarse_grain()` stamps every L1/L2 rule, analogy, and
+guidance node with the same signature and persists path-independent
+`module_cut` / test-locking strategy metadata. `recall_decomposition_strategy()`
+recalls that strategy at cosine ≥ 0.75 across unrelated file and function
+names. The best match feeds back into the homeostatic thresholds and into
+`ReflexLibrary.analogical_hint()`.
 
 `examples/netron_plastic.gauge` exercises all of these constructs alongside the
 existing `volume_law`, `drag`, `frustration`, `recall sink`, synthesis, and
@@ -252,8 +260,11 @@ without re-running a model.
 ## Safety model
 
 - Gauge expressions are interpreted, not evaluated as Python.
-- Synthesized operators are AST-restricted and benchmarked in a separate
-  `python -I` process; promotion never happens from source text alone.
+- Synthesized and fused operators are AST-restricted and benchmarked in a
+  separate `python -I` process against a stratified sample of past ColdSink
+  episodes plus the new task. Promotion requires average new-task `eta_cog`
+  gain, green dark-state gates, and no degradation of the historical gate pass
+  rate. Reflex promotion uses the same gate.
 - Reversible transforms snapshot manifold state before mutation. `uncall` and
   `recall sink` restore those snapshots in `traps.py` and reconcile gate state
   without paying duplicate verified bits.

@@ -21,6 +21,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..core.adaptability import stratified_episodes
 from ..core.cold_sink import ColdSink, canonical_json
 from ..core.kernel import ShiftArtifact
 from ..memory.mera_graph import MeraGraph
@@ -132,12 +133,14 @@ class ReplayCase:
     baseline_eta: float
     origin: str
     bootstrap: bool = False
+    role: str = "historical"
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "baseline_eta": round(self.baseline_eta, 6),
             "origin": self.origin,
             "bootstrap": self.bootstrap,
+            "role": self.role,
             "state_keys": sorted(self.state),
         }
 
@@ -376,8 +379,22 @@ class Synthesizer:
             "baseline_eta": 0.0,
             "candidate_eta": 0.0,
             "improvement": 0.0,
+            "average_eta_gain": 0.0,
+            "new_task_eta_gain": 0.0,
+            "new_task_eta_improved": False,
             "strictly_improved": False,
             "gates_green": False,
+            "historical_gate_pass_rate": 1.0,
+            "candidate_gate_pass_rate": 1.0,
+            "gate_rate_retained": True,
+            "stratified": any(case.role == "historical" for case in cases),
+            "strata": sorted(
+                {
+                    str(case.state.get("task") or case.state.get("id") or "unlabelled")
+                    for case in cases
+                    if case.role == "historical"
+                }
+            ),
             "dark_gates": self._gate_names(),
             "detail": "",
             "episodes": [case.as_dict() for case in cases],
@@ -425,12 +442,26 @@ class Synthesizer:
         gates_green, gate_detail = self._gates_green(candidate_states)
         baselines = [float(item.get("baseline_eta", 0.0)) for item in results]
         candidates = [float(item.get("candidate_eta", 0.0)) for item in results]
+        historical = [index for index, case in enumerate(cases) if case.role == "historical"]
+        new_task = [index for index, case in enumerate(cases) if case.role == "new_task"]
+        baseline_rate = self.gate_pass_rate([cases[index].state for index in historical])
+        candidate_rate = self.gate_pass_rate([candidate_states[index] for index in historical])
+        gate_rate_retained = bool(not historical or candidate_rate + 1e-9 >= baseline_rate)
+        average_eta_gain = sum(improvements) / len(improvements) if improvements else 0.0
+        new_task_eta_gain = (
+            sum(improvements[index] for index in new_task) / len(new_task) if new_task else 0.0
+        )
+        new_task_eta_improved = bool(new_task and new_task_eta_gain > 0.0)
         details: list[str] = []
         if not strictly_improved:
             details.append("no strictly positive eta_cog improvement on every replay")
+        if not new_task_eta_improved:
+            details.append("average eta_cog did not rise on the new task")
+        if not gate_rate_retained:
+            details.append("historical DarkStateGate pass rate degraded")
         if not gates_green:
             details.append(gate_detail)
-        ok = strictly_improved and gates_green
+        ok = strictly_improved and new_task_eta_improved and gate_rate_retained and gates_green
         return {
             "ok": ok,
             "sandbox": "python-I-subprocess",
@@ -439,8 +470,21 @@ class Synthesizer:
             "baseline_eta": round(sum(baselines) / len(baselines), 6),
             "candidate_eta": round(sum(candidates) / len(candidates), 6),
             "improvement": round(min(improvements), 6) if improvements else 0.0,
+            "average_eta_gain": round(average_eta_gain, 6),
+            "new_task_eta_gain": round(new_task_eta_gain, 6),
+            "new_task_eta_improved": new_task_eta_improved,
             "strictly_improved": strictly_improved,
             "gates_green": gates_green,
+            "historical_gate_pass_rate": round(baseline_rate, 6),
+            "candidate_gate_pass_rate": round(candidate_rate, 6),
+            "gate_rate_retained": gate_rate_retained,
+            "stratified": bool(historical),
+            "strata": sorted(
+                {
+                    str(cases[index].state.get("task") or cases[index].state.get("id") or "unlabelled")
+                    for index in historical
+                }
+            ),
             "dark_gates": self._gate_names(),
             "detail": "; ".join(details),
             "episodes": [
@@ -455,40 +499,52 @@ class Synthesizer:
         }
 
     def _replay_cases(self, context: Mapping[str, Any]) -> list[ReplayCase]:
-        cases: list[ReplayCase] = []
+        """Stratified historical episodes plus the new task as a held-out case."""
+        historical: list[ReplayCase] = []
         if self.sink is not None:
             records = self.sink.records(
                 kinds=("uv_state", "gauge_collapse", "pruned_branch"),
-                limit=self.replay_limit * 4,
+                limit=max(self.replay_limit * 8, 8),
                 oldest_first=False,
             )
+            eligible: list[Any] = []
             for record in records:
                 payload = record.payload if isinstance(record.payload, Mapping) else {}
                 state_payload = payload.get("state") if isinstance(payload.get("state"), Mapping) else payload
                 eta_value = self._episode_eta(record.eta_cog, payload, state_payload)
                 baseline = self._baseline_eta(payload, state_payload, eta_value)
-                if not self._high_drag(record.eta_cog, baseline, payload, state_payload):
+                if self._high_drag(record.eta_cog, baseline, payload, state_payload):
+                    eligible.append(record)
+            sampled = stratified_episodes(eligible, per_stratum=2)
+            seen: set[str] = set()
+            for record in [*sampled, *eligible]:
+                key = str(getattr(record, "hash", repr(record)))
+                if key in seen:
                     continue
-                cases.append(
+                seen.add(key)
+                payload = record.payload if isinstance(record.payload, Mapping) else {}
+                state_payload = payload.get("state") if isinstance(payload.get("state"), Mapping) else payload
+                eta_value = self._episode_eta(record.eta_cog, payload, state_payload)
+                baseline = self._baseline_eta(payload, state_payload, eta_value)
+                historical.append(
                     ReplayCase(
                         state=self._json_state(state_payload),
                         baseline_eta=baseline,
                         origin=f"cold_sink:{record.short}",
+                        role="historical",
                     )
                 )
-                if len(cases) >= self.replay_limit:
+                if len(historical) >= max(1, self.replay_limit - 1):
                     break
-        if not cases:
-            baseline = float(context.get("eta", context.get("eta_cog", 0.0)) or 0.0)
-            cases.append(
-                ReplayCase(
-                    state=self._json_state(context),
-                    baseline_eta=baseline,
-                    origin="bootstrap",
-                    bootstrap=True,
-                )
-            )
-        return cases
+        baseline = float(context.get("eta", context.get("eta_cog", 0.0)) or 0.0)
+        new_task = ReplayCase(
+            state=self._json_state(context),
+            baseline_eta=baseline,
+            origin="new_task" if historical else "bootstrap:new_task",
+            bootstrap=not historical,
+            role="new_task",
+        )
+        return [*historical, new_task]
 
     @staticmethod
     def _json_state(state: Any) -> dict[str, Any]:
@@ -553,6 +609,24 @@ class Synthesizer:
 
     def _gate_names(self) -> list[str]:
         return [str(getattr(gate, "name", type(gate).__name__)) for gate in self.gates]
+
+    def gate_pass_rate(self, states: Sequence[Mapping[str, Any]]) -> float:
+        """Fraction of DarkStateGate evaluations that pass on given states."""
+        if not states or not self.gates:
+            return 0.0
+        passed = 0
+        total = 0
+        for state in states:
+            for gate in self.gates:
+                total += 1
+                try:
+                    result = gate.evaluate(state)
+                    verdict = getattr(result, "passed", result)
+                    if verdict is True:
+                        passed += 1
+                except Exception:
+                    continue
+        return passed / total if total else 0.0
 
     def _gates_green(self, states: Sequence[Mapping[str, Any]]) -> tuple[bool, str]:
         if not self.gates:
@@ -685,9 +759,26 @@ class Synthesizer:
                 "signatures": 0,
                 "skipped": ["registry/reflex library unavailable"],
             }
+        name = "reflex_promotion"
+        replay = self._benchmark(
+            self.deterministic_source(name, "eta"),
+            name,
+            "eta",
+            {"eta": 0.0, "task": "gauge:reflex-promotion", "has_regressions": False},
+        )
+        if not replay["ok"]:
+            return {
+                "fused": 0,
+                "operators": [],
+                "signatures": 0,
+                "skipped": [f"sandbox replay gate rejected reflex promotion: {replay['detail']}"],
+                "replay": replay,
+            }
         report = self.reflex_library.compile_operator_chains(
             self.registry,
             sink=self.sink,
             min_support=min_support,
         )
-        return report.as_dict()
+        result = report.as_dict()
+        result["replay"] = replay
+        return result

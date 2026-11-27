@@ -49,10 +49,14 @@ def test_plastic_gauge_runs_probes_and_reports_plasticity(tmp_path: Path) -> Non
     assert result.violations == []
     trace_ops = [entry["op"] for entry in result.trace]
     assert "PLASTIC_GOVERN_BEGIN" in trace_ops
+    assert "EPISTEMIC_PROBE" in trace_ops
     assert "TRAP_HIGH_NOVELTY" in trace_ops
     assert "PROBE" in trace_ops
     assert "RECALL_ANALOGY" in trace_ops
+    assert trace_ops.index("EPISTEMIC_PROBE") < trace_ops.index("OP_APPLY")
     assert result.governor["directive"] == "EPISTEMIC_PROBE"
+    assert result.plasticity["preflight_probe"]["directive"] == "EPISTEMIC_PROBE"
+    assert "constraints" in result.manifolds["fix"]
     assert result.plasticity["enabled"] is True
     assert result.plasticity["probe"]["operators"] == ["read_file", "inspect_deps"]
     assert all(item["ok"] for item in result.plasticity["probe"]["results"])

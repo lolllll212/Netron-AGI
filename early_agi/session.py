@@ -25,6 +25,7 @@ from .core.coupling import Constraint, CouplingMatrix, RepoGraph, RepoScanner
 from .core.governor import CognitiveStepCost, Directive
 from .core.kernel import EarlyAGIKernel, ShiftArtifact, TickResult
 from .core.plasticity import UserCoAdapter
+from .gauge.synthesizer import Synthesizer
 from .llm.router import Edit, Router, TurnProposal, is_safe_relative
 from .memory.mera_graph import MeraGraph
 from .memory.reflex import CompiledReflex, ReflexCompileReport, ReflexLibrary, content_sha
@@ -168,6 +169,9 @@ class AgentSession:
             proposal = self._enforce_allowlist(
                 proposal, brief["files"] if isinstance(brief.get("files"), list) else []
             )
+            policy = plasticity_info.get("autonomy_policy") or {}
+            if proposal is not None and policy.get("patch_granularity") == "surgical":
+                proposal = self._surgical_proposal(proposal)
             if proposal.edits:
                 snapshots = self._capture(proposal.paths)
                 try:
@@ -286,13 +290,15 @@ class AgentSession:
     # -- plasticity ---------------------------------------------------------
     def _prepare_plasticity(self, task: str, graph: RepoGraph, coupling: CouplingMatrix) -> dict[str, Any]:
         """Compute live thresholds, structural analogy, and read-only probes."""
-        del task  # the adapter uses prompt length from the finalised outcome
         profile = self.user_model.profile()
+        prompt_words = len(str(task).split())
         setter = getattr(self.router, "set_user_profile", None)
         if callable(setter):
             setter(profile)
         neutral = {
             "user_profile": profile.as_dict(),
+            "autonomy_policy": profile.as_dict(),
+            "prompt_words": prompt_words,
             "analogy": None,
             "strategy_hint": "",
             "analogy_similarity": 0.0,
@@ -302,6 +308,7 @@ class AgentSession:
             "probe": None,
             "predicted_drop": 0.0,
             "probe_completed": False,
+            "probe_forced": False,
         }
         if not self.plasticity:
             return neutral
@@ -331,10 +338,20 @@ class AgentSession:
 
         probe: dict[str, Any] | None = None
         probe_completed = False
+        probe_forced = bool(profile.epistemic_probe)
+        if probe_forced:
+            self.kernel.governor.probe_pending = True
         if self.kernel.governor.probe_pending:
             registry = self.kernel.registry
             if registry is not None:
-                probe = registry.epistemic_probe(self.probe_calls)
+                calls = list(self.probe_calls)
+                if not any(name == "run_pytest" for name, _ in calls) and "run_pytest" in registry.names():
+                    calls.append(("run_pytest", {"paths": (), "timeout": 30.0}))
+                if probe_forced:
+                    self.kernel.engage_probe_lock()
+                probe = registry.epistemic_probe(calls)
+                if probe_forced:
+                    self.kernel.release_probe_lock()
             probe_completed = True
             self.kernel.governor.clear_probe()
             self.kernel.release_probe_lock()
@@ -344,6 +361,8 @@ class AgentSession:
 
         return {
             "user_profile": profile.as_dict(),
+            "autonomy_policy": profile.as_dict(),
+            "prompt_words": prompt_words,
             "analogy": analogy.as_dict() if analogy is not None else None,
             "strategy_hint": analogy.strategy_hint if analogy is not None else "",
             "analogy_similarity": analogy_similarity,
@@ -355,10 +374,18 @@ class AgentSession:
                 "surprise_ema": round(self.kernel.governor.regulator.surprise_ema, 6),
                 "novelty_score": thresholds.novelty_score,
                 "probe_first": probe is not None,
+                "probe_forced": probe_forced,
+                "autonomy": profile.as_dict(),
+                "directive": (
+                    Directive.EPISTEMIC_PROBE.value
+                    if probe_forced
+                    else (Directive.CRYSTALLIZE.value if thresholds.prefer_crystallize else "")
+                ),
             },
             "probe": probe,
             "predicted_drop": predicted_drop,
             "probe_completed": probe_completed,
+            "probe_forced": probe_forced,
         }
 
     def _finalize_outcome(self, outcome: TurnOutcome, *, task: str, user_overrode: bool) -> TurnOutcome:
@@ -373,6 +400,14 @@ class AgentSession:
             rejected_edits=rejected_edits,
         )
         profile = self.user_model.profile()
+        provider = getattr(self.router, "active_directive", None)
+        directive = provider().as_dict() if callable(provider) else None
+        recorder = getattr(self.router, "record_directive_outcome", None)
+        if callable(recorder):
+            recorder(outcome.eta_cog)
+        evolver = getattr(self.router, "evolve_directives", None)
+        if callable(evolver) and (len(self.history) + 1) % 3 == 0:
+            evolver(self.kernel.sink)
         self.kernel.sink.put(
             "user_feedback",
             {
@@ -384,6 +419,11 @@ class AgentSession:
                 "accept_rate": profile.accept_rate,
                 "patch_granularity": profile.patch_granularity,
                 "rationale_style": profile.rationale_style,
+                "prompt_length": len(str(task).split()),
+                "avg_prompt_words": profile.avg_prompt_words,
+                "manual_overrides": profile.manual_overrides,
+                "autonomy_policy": profile.as_dict(),
+                "adaptation_directive": directive,
             },
             scale=0,
             parent_hash=outcome.hash or None,
@@ -403,6 +443,8 @@ class AgentSession:
     ) -> dict[str, Any]:
         report = coupling.report(self.kernel.chi_max, self.kernel.tau)
         files = [info.path for info in graph.modules.values()]
+        provider = getattr(self.router, "active_directive", None)
+        adaptation_directive = provider().as_dict() if callable(provider) else None
         coupled = [name for name, _ in coupling.top_rows(k=8)]
         sources: dict[str, str] = {}
         binary_files: list[str] = []
@@ -439,6 +481,12 @@ class AgentSession:
             "satisfied_gates": sorted(self.kernel.satisfied_gates),
             "governor": self.kernel.governor.snapshot(),
             "user_model": (plasticity or {}).get("user_profile"),
+            "adaptation_directive": adaptation_directive,
+            "autonomy_policy": (plasticity or {}).get("autonomy_policy"),
+            "prompt_length": int((plasticity or {}).get("prompt_words", 0) or 0),
+            "max_edit_files": 1
+            if ((plasticity or {}).get("autonomy_policy") or {}).get("patch_granularity") == "surgical"
+            else len(files),
             "analogy": (plasticity or {}).get("analogy"),
             "strategy_hint": (plasticity or {}).get("strategy_hint", ""),
             "plasticity": (plasticity or {}).get("plasticity"),
@@ -462,10 +510,21 @@ class AgentSession:
 
     # -- learning ------------------------------------------------------------
     def compile_reflexes(self, *, min_support: int = 2) -> ReflexCompileReport:
-        """Phase-3 consolidation. Off the hot path: call it between turns."""
+        """Phase-3 consolidation, gated by a local sandbox replay."""
         if self.reflexes is None:
             self.reflexes = ReflexLibrary(self.mera)
-        return self.reflexes.compile(min_support=min_support)
+        synthesizer = Synthesizer(sink=self.kernel.sink, gates=(), replay_limit=3)
+
+        def replay_gate() -> dict[str, Any]:
+            name = "reflex_promotion"
+            return synthesizer._benchmark(
+                synthesizer.deterministic_source(name, "eta"),
+                name,
+                "eta",
+                {"eta": 0.0, "task": "session:reflex-promotion", "has_regressions": False},
+            )
+
+        return self.reflexes.compile(min_support=min_support, replay_gate=replay_gate)
 
     def _archive_edits(
         self,
@@ -576,6 +635,14 @@ class AgentSession:
 
     def _scope(self, graph: RepoGraph) -> list[str]:
         return [info.path for info in graph.modules.values()]
+
+    @staticmethod
+    def _surgical_proposal(proposal: TurnProposal) -> TurnProposal:
+        """After frequent reverts, permit only the smallest verified patch."""
+        if len(proposal.edits) <= 1:
+            return proposal
+        rejected = (*proposal.rejected, {"reason": "autonomy policy: surgical single-file patch"})
+        return replace(proposal, edits=proposal.edits[:1], rejected=rejected)
 
     def _enforce_allowlist(self, proposal: TurnProposal, files: Sequence[str]) -> TurnProposal:
         """Reject any edit the brief did not declare, regardless of router type."""

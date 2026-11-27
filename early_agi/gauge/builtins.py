@@ -60,8 +60,10 @@ class GaugeGate:
         except Exception as exc:
             return GateResult(self.name, None, self.bits, f"{type(exc).__name__}: {exc}")
         if value is None:
-            return GateResult(self.name, None, self.bits, "predicate could not be verified")
-        return GateResult(self.name, bool(value), self.bits, "")
+            return GateResult(self.name, None, self.bits, "predicate could not be verified", None)
+        passed = bool(value)
+        constraint = None if passed else f"assert {self.name}"
+        return GateResult(self.name, passed, self.bits, constraint or "", constraint)
 
 
 class GaugeBuiltins:

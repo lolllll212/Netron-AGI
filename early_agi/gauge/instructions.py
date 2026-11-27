@@ -13,6 +13,7 @@ from typing import Any
 
 import numpy as np
 
+from ..core.adaptability import distilled_constraint
 from ..core.coupling import Constraint, RepoScanner
 from ..core.entropy_sensor import EntanglementReport, matrix_fingerprint
 from ..core.governor import Directive
@@ -33,6 +34,28 @@ _READ_ONLY_FOOTPRINTS = frozenset({"none", "read", "readonly", "read_only"})
 
 def _mutating_footprint(items: Any) -> tuple[str, ...]:
     return tuple(str(item) for item in (items or ()) if str(item).casefold() not in _READ_ONLY_FOOTPRINTS)
+
+
+def _append_distilled_constraints(execution: Any, results: Mapping[str, GateResult]) -> list[str]:
+    """Put one minimal constraint per failed gate on every active manifold."""
+    distilled: list[str] = []
+    for name, result in results.items():
+        if result.passed is not False:
+            continue
+        constraint = result.constraint or distilled_constraint(name, result.as_dict())
+        if not constraint:
+            continue
+        distilled.append(constraint)
+        for manifold in execution.manifolds.values():
+            existing = {_constraint_view(item) for item in manifold.constraints}
+            if constraint not in existing:
+                manifold.constraints.append(constraint)
+    execution.distilled_constraints = list(dict.fromkeys([*execution.distilled_constraints, *distilled]))
+    return distilled
+
+
+def _constraint_view(item: Any) -> str:
+    return item if isinstance(item, str) else str(item)[:240]
 
 
 class GaugeOpcodeRunner:
@@ -272,7 +295,15 @@ class GaugeOpcodeRunner:
             (result.bits for result in results.values() if result.passed is True), 0.0
         ) - sum((result.bits for result in results.values() if result.passed is False), 0.0)
         self.execution.state.has_regressions = any(result.passed is False for result in results.values())
-        return {name: result.verdict for name, result in results.items()}
+        distilled = _append_distilled_constraints(self.execution, results)
+        self.execution.plasticity["distilled_constraints"] = distilled
+        self.vm.result.plasticity = dict(self.execution.plasticity)
+        self.vm.result.manifolds = {
+            name: manifold.as_dict() for name, manifold in self.execution.manifolds.items()
+        }
+        return {name: result.verdict for name, result in results.items()} | (
+            {"distilled_constraints": distilled} if distilled else {}
+        )
 
     def _op_govern_check(self, _args: dict[str, Any], _instruction: Instruction) -> dict[str, Any]:
         report = self.execution.entanglement or EntanglementReport(0.0, 0.0, 0, False)
@@ -296,6 +327,11 @@ class GaugeOpcodeRunner:
             self.execution.events.update({"drag", "stall"})
         if self.execution.directive is Directive.RECALL_SINK:
             self.execution.events.update({"frustration", "recall"})
+        if self.execution.plasticity.get("preflight_probe") and self.execution.probe_results:
+            # The preflight directive is part of the trace, and the nested trap
+            # still records the declared read-only probe without repeating it.
+            self.execution.directive = Directive.EPISTEMIC_PROBE
+            self.execution.events.add("high_novelty")
         return {
             "eta": round(self.execution.eta, 6),
             "directive": self.execution.directive.value,
@@ -402,25 +438,44 @@ class GaugeOpcodeRunner:
     def _op_recall_sink(self, args: dict[str, Any], _instruction: Instruction) -> dict[str, Any]:
         return self.traps.recall_sink(args.get("condition"))
 
+    @staticmethod
+    def _probe_call_kwargs(name: str, execution: Any) -> dict[str, Any]:
+        """Baseline tests and SMT checks are read-only but have fixed signatures."""
+        if name == "run_pytest":
+            return {"paths": (), "timeout": 30.0}
+        if name == "check_z3":
+            return {"smt2": "(check-sat)", "timeout_ms": 1000}
+        return {"state": execution.plain_state()}
+
     def _op_probe(self, args: dict[str, Any], _instruction: Instruction) -> dict[str, Any]:
         """Run read-only extern operators before any mutating Gauge op."""
         manifold = str(args.get("manifold", ""))
         if manifold not in self.execution.manifolds:
             raise GaugeRuntimeError(f"cannot probe unknown manifold {manifold!r}")
         ops = [str(item) for item in args.get("ops", ())]
-        calls = [(name, {"state": self.execution.plain_state()}) for name in ops]
+        preflight = bool(args.get("preflight", False))
+        if self.execution.probe_results and not preflight:
+            return {
+                "manifold": manifold,
+                "operators": ops,
+                "results": len(self.execution.probe_results),
+                "already_probed": True,
+            }
+        calls = [(name, self._probe_call_kwargs(name, self.execution)) for name in ops]
         probe = self.vm.registry.epistemic_probe(calls) if calls else {"operators": [], "results": []}
         self.execution.probe_results = list(probe["results"])
         self.vm.kernel.governor.clear_probe()
         self.vm.kernel.release_probe_lock()
         thresholds = self.vm.kernel.governor.modulate(max(0.5, self.execution.analogy_similarity), 0.5)
         self.execution.novelty_score = thresholds.novelty_score
-        self.execution.events.discard("high_novelty")
+        if not preflight:
+            self.execution.events.discard("high_novelty")
         self.execution.plasticity.update(
             {
                 "thresholds": thresholds.as_dict(),
                 "novelty_score": thresholds.novelty_score,
                 "probe": probe,
+                "distilled_constraints": list(self.execution.distilled_constraints),
             }
         )
         self.vm.result.plasticity = dict(self.execution.plasticity)
@@ -429,6 +484,7 @@ class GaugeOpcodeRunner:
             "operators": ops,
             "results": len(probe["results"]),
             "probe": probe,
+            "preflight": preflight,
         }
 
     def _op_recall_analogy(self, args: dict[str, Any], _instruction: Instruction) -> dict[str, Any]:

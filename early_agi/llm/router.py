@@ -7,12 +7,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from ..core.adaptability import AdaptationDirective, DirectivePool
 from ..core.cold_sink import canonical_json
 from ..core.kernel import ShiftArtifact
 from ..core.plasticity import AutonomyProfile
 from .client import LLMUnavailable, OpenAICompatibleClient
 
 __all__ = [
+    "AdaptationDirective",
+    "DirectivePool",
     "DualTierRouter",
     "Edit",
     "Router",
@@ -46,18 +49,27 @@ Choose the smallest artefact that actually disentangles the coupling.
 """
 
 
-def _profile_system(system: str, profile: AutonomyProfile | None) -> str:
-    """Inject implicit user preferences into the executor system brief."""
-    if profile is None:
-        return system
-    data = profile.as_dict()
-    return (
-        f"{system}\n\nLive user co-adaptation profile (adapt, do not restate):\n"
-        f"- patch granularity: {data['patch_granularity']}\n"
-        f"- probe before edit: {str(data['probe_before_edit']).lower()}\n"
-        f"- rationale style: {data['rationale_style']}\n"
-        f"- observed accept rate: {data['accept_rate']}\n"
-    )
+def _profile_system(
+    system: str,
+    profile: AutonomyProfile | None,
+    directive: AdaptationDirective | None = None,
+) -> str:
+    """Compose a live SQLite directive and implicit user preferences."""
+    sections = [system]
+    if directive is not None:
+        sections.append(
+            f"Live evolved adaptation policy (adapt, do not restate):\n{directive.system_directive()}"
+        )
+    if profile is not None:
+        data = profile.as_dict()
+        sections.append(
+            "Live user co-adaptation profile (adapt, do not restate):\n"
+            f"- patch granularity: {data['patch_granularity']}\n"
+            f"- probe before edit: {str(data['probe_before_edit']).lower()}\n"
+            f"- rationale style: {data['rationale_style']}\n"
+            f"- observed accept rate: {data['accept_rate']}\n"
+        )
+    return "\n\n".join(sections)
 
 
 class RouterError(RuntimeError):
@@ -183,14 +195,47 @@ def parse_shift(data: Any, *, tokens: int = 0, latency_ms: float = 0.0) -> Shift
 class DualTierRouter:
     """Fast tier for execution, deep tier for reframing."""
 
-    def __init__(self, fast: OpenAICompatibleClient, deep: OpenAICompatibleClient) -> None:
+    def __init__(
+        self,
+        fast: OpenAICompatibleClient,
+        deep: OpenAICompatibleClient,
+        *,
+        directive_pool: DirectivePool | None = None,
+    ) -> None:
         self.fast = fast
         self.deep = deep
         self.user_profile: AutonomyProfile | None = None
+        self.directive_pool = directive_pool or DirectivePool()
 
     def set_user_profile(self, profile: AutonomyProfile | None) -> None:
         """Receive the live implicit user model from the session."""
         self.user_profile = profile
+
+    def set_directive_pool(self, pool: DirectivePool) -> None:
+        self.directive_pool = pool
+
+    def active_directive(self) -> AdaptationDirective:
+        return self.directive_pool.active()
+
+    def record_directive_outcome(self, eta_cog: float, *, held_out: bool = False) -> None:
+        self.directive_pool.record(self.active_directive().directive_id, float(eta_cog), held_out=held_out)
+
+    def evolve_directives(self, sink: Any | None = None, *, held_out: bool = True) -> dict[str, Any]:
+        """Mutate top directives using ColdSink post-mortem eta_cog traces."""
+        active = self.active_directive()
+        if sink is not None:
+            records = sink.records(
+                kinds=("uv_state", "pruned_branch", "gauge_collapse", "turn_outcome", "user_feedback")
+            )
+            for record in records:
+                payload = record.payload if isinstance(record.payload, Mapping) else {}
+                value = payload.get("eta_cog", payload.get("eta", record.eta_cog))
+                try:
+                    eta = float(value) if value is not None else 0.0
+                except (TypeError, ValueError):
+                    continue
+                self.directive_pool.record(active.directive_id, eta, held_out=held_out)
+        return self.directive_pool.evolve()
 
     @classmethod
     def from_settings(cls, settings: Any = None) -> DualTierRouter:
@@ -204,6 +249,7 @@ class DualTierRouter:
         return cls(
             OpenAICompatibleClient.from_settings("fast", settings),
             OpenAICompatibleClient.from_settings("deep", settings),
+            directive_pool=DirectivePool(getattr(settings, "directive_path", ":memory:")),
         )
 
     def execute(self, brief: Mapping[str, Any]) -> TurnProposal:
@@ -222,7 +268,10 @@ class DualTierRouter:
 
     def _messages(self, system: str, brief: Mapping[str, Any]) -> list[dict[str, str]]:
         return [
-            {"role": "system", "content": _profile_system(system, self.user_profile)},
+            {
+                "role": "system",
+                "content": _profile_system(system, self.user_profile, self.active_directive()),
+            },
             {"role": "user", "content": canonical_json(brief)},
         ]
 
@@ -236,16 +285,42 @@ class ScriptedRouter:
         shifts: Sequence[ShiftArtifact | Mapping[str, Any]] = (),
         *,
         strict: bool = False,
+        directive_pool: DirectivePool | None = None,
     ) -> None:
         self._executions: deque[Any] = deque(executions)
         self._shifts: deque[Any] = deque(shifts)
         self.strict = strict
         self.calls: list[str] = []
         self.user_profile: AutonomyProfile | None = None
+        self.directive_pool = directive_pool or DirectivePool()
 
     def set_user_profile(self, profile: AutonomyProfile | None) -> None:
         """Accept the same live profile hook as the networked router."""
         self.user_profile = profile
+
+    def set_directive_pool(self, pool: DirectivePool) -> None:
+        self.directive_pool = pool
+
+    def active_directive(self) -> AdaptationDirective:
+        return self.directive_pool.active()
+
+    def record_directive_outcome(self, eta_cog: float, *, held_out: bool = False) -> None:
+        self.directive_pool.record(self.active_directive().directive_id, float(eta_cog), held_out=held_out)
+
+    def evolve_directives(self, sink: Any | None = None, *, held_out: bool = True) -> dict[str, Any]:
+        active = self.active_directive()
+        if sink is not None:
+            for record in sink.records(
+                kinds=("uv_state", "pruned_branch", "gauge_collapse", "turn_outcome", "user_feedback")
+            ):
+                payload = record.payload if isinstance(record.payload, Mapping) else {}
+                value = payload.get("eta_cog", payload.get("eta", record.eta_cog))
+                try:
+                    eta = float(value) if value is not None else 0.0
+                except (TypeError, ValueError):
+                    continue
+                self.directive_pool.record(active.directive_id, eta, held_out=held_out)
+        return self.directive_pool.evolve()
 
     def execute(self, brief: Mapping[str, Any]) -> TurnProposal:
         self.calls.append("execute")

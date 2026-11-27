@@ -4,7 +4,8 @@ Three engines live here:
 
 * :class:`HomeostaticRegulator` turns prediction surprise and analogical
   familiarity into live ``eta_min`` / ``eta_high`` / ``tau`` / ``chi_max``
-  thresholds, and asks for read-only probing before the first mutation.
+  thresholds; high surprise grants exploration patience and read-only probing,
+  while low surprise tightens thresholds toward ``CRYSTALLIZE``.
 * :class:`AnalogicalMatcher` compares normalised Schmidt spectra plus AST motif
   ratios, so a strategy learned in one repository can be recalled in another.
 * :class:`UserCoAdapter` infers patch granularity, autonomy, and rationale
@@ -48,6 +49,9 @@ class AdaptiveThresholds:
     chi_max: int
     should_probe_first: bool
     novelty_score: float
+    exploration_patience: int = 0
+    crystallization_bias: float = 0.0
+    prefer_crystallize: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -57,6 +61,9 @@ class AdaptiveThresholds:
             "chi_max": self.chi_max,
             "should_probe_first": self.should_probe_first,
             "novelty_score": self.novelty_score,
+            "exploration_patience": self.exploration_patience,
+            "crystallization_bias": self.crystallization_bias,
+            "prefer_crystallize": self.prefer_crystallize,
         }
 
 
@@ -95,6 +102,18 @@ class HomeostaticRegulator:
         chi_max = max(2, round(self.base_chi_max + (2 if novelty > 0.75 else 0)))
         should_probe = bool(novelty > 0.65 or (stakes > 0.75 and familiarity < 0.70))
 
+        # A stable, familiar task tightens the crystallization envelope instead
+        # of leaving the governor in a permanently exploratory mode.
+        if novelty < 0.35:
+            closeness = novelty / 0.35
+            eta_min = float(np.clip(self.base_eta_min * (1.0 + 0.15 * (1.0 - closeness)), 0.05, 0.80))
+            eta_high = float(max(eta_min * 2.2, self.base_eta_high * (0.90 + 0.10 * closeness)))
+            tau = float(np.clip(self.base_tau * (0.85 + 0.15 * closeness), 0.06, 0.35))
+            chi_max = max(2, round(self.base_chi_max))
+        exploration_patience = int(np.clip(round(novelty * 3.0), 0, 3))
+        crystallization_bias = round(float(np.clip(1.0 - novelty, 0.0, 1.0)), 4)
+        prefer_crystallize = bool(novelty < 0.35 and not should_probe)
+
         thresholds = AdaptiveThresholds(
             eta_min=round(eta_min, 4),
             eta_high=round(eta_high, 4),
@@ -102,6 +121,9 @@ class HomeostaticRegulator:
             chi_max=chi_max,
             should_probe_first=should_probe,
             novelty_score=round(novelty, 4),
+            exploration_patience=exploration_patience,
+            crystallization_bias=crystallization_bias,
+            prefer_crystallize=prefer_crystallize,
         )
         self.last_thresholds = thresholds
         return thresholds
@@ -295,6 +317,10 @@ class AutonomyProfile:
     probe_before_edit: bool
     rationale_style: str  # "terse" | "detailed"
     accept_rate: float
+    epistemic_probe: bool = False
+    multi_file_crystallization: bool = False
+    manual_overrides: int = 0
+    avg_prompt_words: float = 18.0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -302,6 +328,10 @@ class AutonomyProfile:
             "probe_before_edit": self.probe_before_edit,
             "rationale_style": self.rationale_style,
             "accept_rate": self.accept_rate,
+            "epistemic_probe": self.epistemic_probe,
+            "multi_file_crystallization": self.multi_file_crystallization,
+            "manual_overrides": self.manual_overrides,
+            "avg_prompt_words": round(self.avg_prompt_words, 3),
         }
 
 
@@ -341,21 +371,35 @@ class UserCoAdapter:
         accept_rate = (self.accepted_turns / total) if total > 0 else 0.75
         avg_words = float(np.mean(self._prompt_lengths)) if self._prompt_lengths else 18.0
 
-        if accept_rate < 0.55 or self.manual_overrides >= 2:
+        frequent_reverts = (
+            self.rejected_or_reverted_turns >= 2 or self.manual_overrides >= 2 or accept_rate < 0.55
+        )
+        sustained_acceptance = accept_rate > 0.85 and total >= 3 and self.rejected_or_reverted_turns == 0
+        if frequent_reverts:
             granularity = "surgical"
             probe_first = True
-        elif accept_rate > 0.85 and total >= 3:
+            epistemic_probe = True
+            multi_file = False
+        elif sustained_acceptance:
             granularity = "bold"
             probe_first = False
+            epistemic_probe = False
+            multi_file = True
         else:
             granularity = "balanced"
             probe_first = accept_rate < 0.70
+            epistemic_probe = False
+            multi_file = False
 
         return AutonomyProfile(
             patch_granularity=granularity,
             probe_before_edit=probe_first,
             rationale_style="terse" if avg_words < 14.0 else "detailed",
             accept_rate=round(accept_rate, 3),
+            epistemic_probe=epistemic_probe,
+            multi_file_crystallization=multi_file,
+            manual_overrides=self.manual_overrides,
+            avg_prompt_words=avg_words,
         )
 
     def replay(self, records: Sequence[Mapping[str, Any]]) -> None:

@@ -2,12 +2,36 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 from . import ast as g
+
+
+def _constraint_atom(node: Any) -> str:
+    if isinstance(node, Mapping):
+        for key in ("name", "attr", "value"):
+            value = node.get(key)
+            if value is not None:
+                return str(value)
+        return str(node)[:120]
+    return str(node)
+
+
+def _constraint_view(item: Any) -> str:
+    """A compact, JSON-safe rendering; never a raw AST/stack-trace dump."""
+    if isinstance(item, str):
+        return item[:240]
+    if isinstance(item, Mapping):
+        left = _constraint_atom(item.get("left"))
+        right = _constraint_atom(item.get("right"))
+        operator = str(item.get("op", ""))
+        if left or right:
+            return f"{left} {operator} {right}".strip()[:240]
+    return str(item)[:240]
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,12 +94,25 @@ class ManifoldState:
     data: dict[str, Any] = field(default_factory=dict)
 
     def snapshot(self) -> dict[str, Any]:
-        return {"basis": self.basis, "data": dict(self.data), "collapsed": self.collapsed}
+        return {
+            "basis": self.basis,
+            "data": dict(self.data),
+            "collapsed": self.collapsed,
+            "constraints": list(self.constraints),
+        }
 
     def restore(self, snapshot: dict[str, Any]) -> None:
         self.basis = str(snapshot.get("basis", "identity"))
         self.data = dict(snapshot.get("data", {}))
         self.collapsed = bool(snapshot.get("collapsed", False))
+        self.constraints = list(snapshot.get("constraints", ()))
+
+    def active_constraints(self) -> list[str]:
+        return [
+            _constraint_view(item)
+            for item in self.constraints
+            if isinstance(item, str) and item.startswith(("assert ", "counterexample:"))
+        ]
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -85,6 +122,8 @@ class ManifoldState:
             "basis": self.basis,
             "collapsed": self.collapsed,
             "data": dict(self.data),
+            "constraints": [_constraint_view(item) for item in self.constraints],
+            "active_constraints": self.active_constraints(),
         }
 
 

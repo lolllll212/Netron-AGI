@@ -14,7 +14,8 @@ The trust model is the whole point, and it is deliberately narrow:
   actually learned on (content hash, never "looks similar");
 * its output still faces the same gates as a model edit, and if the gates it was
   compiled against do not pass, the files are restored immediately;
-* enough misses retire it.
+* misses and surprise fade a continuous confidence weight; there is no binary
+  active/retired switch.
 
 Memory can therefore make the loop cheaper, never less verified. Nothing here
 writes to the sink except through the append-only store, so every reflex carries
@@ -27,7 +28,7 @@ import hashlib
 import re
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -154,6 +155,7 @@ class ReflexCompileReport:
     signatures: int = 0
     reflexes: int = 0
     skipped: tuple[str, ...] = ()
+    replay: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -161,6 +163,7 @@ class ReflexCompileReport:
             "signatures": self.signatures,
             "reflexes": self.reflexes,
             "skipped": list(self.skipped),
+            "replay": dict(self.replay),
         }
 
 
@@ -498,7 +501,7 @@ class ReflexLibrary:
         graph: MeraGraph,
         *,
         miss_limit: int = 2,
-        confidence_threshold: float = 0.18,
+        confidence_threshold: float = 0.30,
         decay: SynapticDecay | None = None,
     ) -> None:
         self.graph = graph
@@ -506,8 +509,23 @@ class ReflexLibrary:
         self.confidence_threshold = float(confidence_threshold)
         self.decay = decay or SynapticDecay()
 
-    def compile(self, *, min_support: int = 2, limit: int = 2000) -> ReflexCompileReport:
-        return compile_reflexes(self.graph, min_support=min_support, limit=limit)
+    def compile(
+        self,
+        *,
+        min_support: int = 2,
+        limit: int = 2000,
+        replay_gate: Any | None = None,
+    ) -> ReflexCompileReport:
+        replay: dict[str, Any] = {}
+        if replay_gate is not None:
+            replay = dict(replay_gate() or {})
+            if not replay.get("ok", False):
+                return ReflexCompileReport(
+                    skipped=(f"sandbox replay gate rejected reflex promotion: {replay.get('detail', '')}",),
+                    replay=replay,
+                )
+        report = compile_reflexes(self.graph, min_support=min_support, limit=limit)
+        return replace(report, replay=replay)
 
     def compile_operator_chains(
         self,
@@ -645,7 +663,11 @@ class ReflexLibrary:
                     created_at=created_at,
                 )
             )
-        return sorted(compiled, key=lambda reflex: (len(reflex.expected_gates), reflex.support), reverse=True)
+        return sorted(
+            compiled,
+            key=lambda reflex: (reflex.confidence, len(reflex.expected_gates), reflex.support),
+            reverse=True,
+        )
 
     # -- execution ----------------------------------------------------------
     def match(
@@ -659,20 +681,19 @@ class ReflexLibrary:
         requested_task = task if task is not None else (context or {}).get("task")
         signature = task_signature(str(requested_task)) if requested_task is not None else None
         best: CompiledReflex | None = None
+        best_score = (-1.0, -1, -1)
         for reflex in self.reflexes():
-            if reflex.misses >= self.miss_limit:
-                continue
+            # No binary active/retired flag: confidence is a continuous weight
+            # combining recency, surprise and the synaptic fast weight.
             if reflex.confidence < self.confidence_threshold:
                 continue
             if signature is not None and signature not in reflex.task_signatures:
                 continue
             if not all(edit.accepts(root) for edit in reflex.edits):
                 continue
-            if best is None or (len(reflex.expected_gates), reflex.support) > (
-                len(best.expected_gates),
-                best.support,
-            ):
-                best = reflex
+            score = (reflex.confidence, len(reflex.expected_gates), reflex.support)
+            if best is None or score > best_score:
+                best, best_score = reflex, score
         return best
 
     def record(

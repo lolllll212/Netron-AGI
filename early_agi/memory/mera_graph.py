@@ -66,6 +66,7 @@ class CoarseGrainReport:
     spectral_entropy_bits: float = 0.0
     skipped: str = ""
     analogies: int = 0
+    guidance: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -78,6 +79,7 @@ class CoarseGrainReport:
             "spectral_entropy_bits": round(self.spectral_entropy_bits, 4),
             "skipped": self.skipped,
             "analogies": self.analogies,
+            "guidance": self.guidance,
         }
 
 
@@ -150,6 +152,42 @@ class MeraGraph:
             self._conn.executescript(_SCHEMA)
         self._load_analogies()
 
+    @staticmethod
+    def _count(value: Any, default: int = 0) -> int:
+        if isinstance(value, (list, tuple, set)):
+            return len(value)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _default_signature(self, payload: Mapping[str, Any]) -> StructuralSignature:
+        modules = max(1, self._count(payload.get("num_modules", payload.get("modules")), 1))
+        matrix = np.eye(modules, dtype=np.float64)
+        return self.encode_signature(
+            matrix,
+            num_modules=modules,
+            num_imports=self._count(payload.get("num_imports", payload.get("imports")), 0),
+            num_functions=self._count(payload.get("num_functions", payload.get("functions")), 0),
+            num_gates=self._count(payload.get("num_gates", payload.get("gates")), 0),
+        )
+
+    @staticmethod
+    def _decomposition_strategy(
+        payload: Mapping[str, Any], strategy: Mapping[str, Any] | None
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "module_cut": "dependency_cut",
+            "test_locking_order": ["read-only probe", "lock tests", "crystallize"],
+            "probe_depth": 1,
+        }
+        if isinstance(strategy, Mapping):
+            result.update(dict(strategy))
+        for key in ("module_cut", "test_locking_order", "probe_depth"):
+            if key in payload:
+                result[key] = payload[key]
+        return result
+
     def put_node(
         self,
         kind: str,
@@ -159,27 +197,68 @@ class MeraGraph:
         parent_hash: str | None = None,
         eta_cog: float | None = None,
         weight: float = 1.0,
+        signature: StructuralSignature | None = None,
+        strategy: Mapping[str, Any] | None = None,
     ) -> str:
-        digest = self.sink.put(kind, payload, scale=scale, parent_hash=parent_hash, eta_cog=eta_cog)
-        encoded = canonical_json(dict(payload))
+        """Persist a node, stamping every L1/L2 node with a structural signature."""
+        data = dict(payload)
+        structural: StructuralSignature | None = None
+        if scale >= 1:
+            raw = data.get("structural_signature")
+            if isinstance(raw, Mapping):
+                structural = StructuralSignature.from_payload(raw)
+            elif signature is not None:
+                structural = signature
+            else:
+                nested = data.get("signature")
+                structural = (
+                    StructuralSignature.from_payload(nested)
+                    if isinstance(nested, Mapping) and "spectrum" in nested
+                    else self._default_signature(data)
+                )
+            data["structural_signature"] = structural.as_dict()
+            data["decomposition_strategy"] = self._decomposition_strategy(data, strategy)
+        digest = self.sink.put(kind, data, scale=scale, parent_hash=parent_hash, eta_cog=eta_cog)
+        encoded = canonical_json(data)
         with self._lock:
             self._conn.execute(
                 "INSERT OR IGNORE INTO nodes (hash, scale, kind, payload, parent_hash, eta_cog, weight, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (digest, scale, kind, encoded, parent_hash, eta_cog, weight, time.time()),
             )
+        if scale >= 1 and structural is not None:
+            meta = dict(data.get("metadata") or {}) if isinstance(data.get("metadata"), Mapping) else {}
+            meta.update(data["decomposition_strategy"])
+            meta.update({"kind": kind, "scale": scale, "node_hash": digest})
+            self.analogies.register(
+                f"node:{digest}",
+                structural,
+                str(data.get("strategy_hint") or data.get("directive") or "module_cut"),
+                meta,
+            )
         return digest
 
     def _load_analogies(self) -> None:
-        for node in self.nodes(kind="analogy"):
+        all_nodes = self.nodes()
+        ordered = [node for node in all_nodes if node["kind"] == "analogy"]
+        ordered.extend(node for node in all_nodes if node["kind"] != "analogy")
+        for node in ordered:
             payload = node["payload"]
-            pattern_id = str(payload.get("pattern_id") or node["hash"])
-            signature = StructuralSignature.from_payload(payload.get("signature", {}))
+            raw = payload.get("structural_signature", payload.get("signature"))
+            if node["scale"] < 1 or not isinstance(raw, Mapping) or "spectrum" not in raw:
+                continue
+            signature = StructuralSignature.from_payload(raw)
+            metadata = (
+                dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), Mapping) else {}
+            )
+            strategy = payload.get("decomposition_strategy")
+            if isinstance(strategy, Mapping):
+                metadata.update(dict(strategy))
             self.analogies.register(
-                pattern_id,
+                str(payload.get("pattern_id") or f"node:{node['hash']}"),
                 signature,
-                str(payload.get("strategy_hint", "")),
-                payload.get("metadata", {}),
+                str(payload.get("strategy_hint") or payload.get("directive") or "module_cut"),
+                metadata,
             )
 
     def encode_signature(
@@ -208,21 +287,44 @@ class MeraGraph:
         metadata: Mapping[str, Any] | None = None,
     ) -> str:
         """Persist an L1/L2 strategy alongside its structural signature."""
+        meta = dict(metadata or {})
         payload = {
             "pattern_id": pattern_id,
             "signature": signature.as_dict(),
+            "structural_signature": signature.as_dict(),
             "strategy_hint": strategy_hint,
-            "metadata": dict(metadata or {}),
+            "metadata": meta,
         }
-        digest = self.put_node("analogy", payload, scale=2, weight=1.0)
-        self.analogies.register(pattern_id, signature, strategy_hint, metadata)
+        digest = self.put_node("analogy", payload, scale=2, weight=1.0, signature=signature, strategy=meta)
+        self.analogies.register(pattern_id, signature, strategy_hint, meta)
         return digest
 
     def best_analogy(
-        self, signature: StructuralSignature, min_similarity: float = 0.72
+        self, signature: StructuralSignature, min_similarity: float = 0.75
     ) -> AnalogyMatch | None:
         """Recall the closest structural strategy learned in any repository."""
         return self.analogies.best_match(signature, min_similarity=min_similarity)
+
+    def recall_decomposition_strategy(
+        self,
+        signature: StructuralSignature,
+        min_similarity: float = 0.75,
+    ) -> dict[str, Any] | None:
+        """Zero-shot recall of module cuts and test-locking order at cosine >= .75."""
+        match = self.analogies.best_match(signature, min_similarity=min_similarity)
+        if match is None:
+            return None
+        metadata = dict(match.metadata)
+        return {
+            "pattern_id": match.pattern_id,
+            "similarity": match.similarity,
+            "strategy_hint": match.strategy_hint,
+            "module_cut": metadata.get("module_cut", "dependency_cut"),
+            "test_locking_order": list(
+                metadata.get("test_locking_order", ["read-only probe", "lock tests", "crystallize"])
+            ),
+            "metadata": metadata,
+        }
 
     def link(self, src: str, dst: str, relation: str, weight: float = 1.0) -> None:
         with self._lock:
@@ -298,6 +400,12 @@ class MeraGraph:
         rule_hashes: list[str] = []
         support_total = 0
         analogy_count = 0
+        guidance_count = 0
+        decomposition = {
+            "module_cut": "dependency_cut",
+            "test_locking_order": ["read-only probe", "lock tests", "crystallize"],
+            "probe_depth": 1,
+        }
         for members in buckets.values():
             if len(members) < 2:
                 continue
@@ -322,21 +430,54 @@ class MeraGraph:
                 scale=scale + 1,
                 eta_cog=payload["eta_mean"],
                 weight=float(len(members)),
+                signature=signature,
+                strategy=decomposition,
             )
             rule_hashes.append(digest)
             support_total += len(members)
-            self.register_analogy(
-                digest,
-                signature,
-                strategy_hint,
-                metadata={
-                    "source_scale": scale,
-                    "support": len(members),
-                    "pattern": list(pattern),
-                    "eta_mean": payload["eta_mean"],
-                },
-            )
+            metadata = {
+                "source_scale": scale,
+                "support": len(members),
+                "pattern": list(pattern),
+                "eta_mean": payload["eta_mean"],
+                **decomposition,
+            }
+            self.register_analogy(digest, signature, strategy_hint, metadata=metadata)
             analogy_count += 1
+
+            # L0 stays verbatim in ColdSink; the L1/L2 guidance is abstract and
+            # carries no concrete paths or function names.
+            guidance_payload = {
+                "abstraction_level": f"L{max(1, scale + 1)}",
+                "sequence": ["read-only probe", "lock tests", "module cut", "crystallize"],
+                "module_cut": decomposition["module_cut"],
+                "test_locking_order": list(decomposition["test_locking_order"]),
+                "probe_depth": decomposition["probe_depth"],
+                "support": len(members),
+                "eta_mean": payload["eta_mean"],
+                "strategy_hint": strategy_hint,
+                "source_scale": scale,
+                "path_independent": True,
+                "no_function_names": True,
+                "member_hashes": [member.hash for member in members],
+            }
+            guidance_digest = self.put_node(
+                "guidance",
+                guidance_payload,
+                scale=scale + 1,
+                eta_cog=payload["eta_mean"],
+                weight=float(len(members)),
+                signature=signature,
+                strategy=decomposition,
+            )
+            guidance_count += 1
+            self.link(digest, guidance_digest, "distilled_into", 1.0)
+            self.register_analogy(
+                guidance_digest,
+                signature,
+                strategy_hint or "module_cut",
+                metadata={**metadata, "guidance": True},
+            )
             for member in members:
                 self.link(member.hash, digest, "absorbed_by", 1.0 / len(members))
 
@@ -362,7 +503,8 @@ class MeraGraph:
             rules=tuple(rule_hashes),
             truncation_error=report.truncation_error,
             spectral_entropy_bits=report.spectral_entropy_bits,
-            analogies=analogy_count,
+            analogies=analogy_count + guidance_count,
+            guidance=guidance_count,
         )
 
     def nodes(self, scale: int | None = None, kind: str | None = None) -> list[dict[str, Any]]:
