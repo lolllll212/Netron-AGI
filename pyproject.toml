@@ -42,6 +42,7 @@ thrml = ["thrml>=0.1.4"]
 
 [project.scripts]
 early-agi = "early_agi.demo:main"
+early-agi-bench = "early_agi.bench.cli:main"
 gauge = "early_agi.gauge.cli:main"
 early-agi-gauge = "early_agi.gauge.cli:main"
 
@@ -57,6 +58,7 @@ include = ["early_agi*"]
 
 [tool.setuptools.package-data]
 early_agi = ["py.typed"]
+"early_agi.bench" = ["*.gauge"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

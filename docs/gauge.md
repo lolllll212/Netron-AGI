@@ -206,6 +206,18 @@ local `.env`, `--backend` to select the relaxation backend for `run`, and
 configured cold sink (in-memory by default) and reports synthesis replay,
 recall, and fused-reflex results.
 
+## Empirical A/B harness
+
+`early_agi/bench/` runs `netron_plastic.gauge` against real multi-file Python
+bug fixtures with the `bounded_chi` backend and a shared `ReflexLibrary`. The
+plastic example's gates use the candidate view (`p.files`, `p.targets`, and
+`p.has_regressions`) so `pytest_run` and `ast_check` verify the actual temporary
+workspace instead of the manifold object. The benchmark compares that arm with
+a plain retry-loop baseline using the same router seam and reports discovery@k,
+zero-forgetting retention, repeat-task reflex speedup, real `eta_cog`, tokens,
+and rollbacks. See [docs/benchmark.md](benchmark.md) for commands, the offline
+guarantee, and the opt-in live OpenAI-compatible adapter.
+
 ## Python API
 
 ```python

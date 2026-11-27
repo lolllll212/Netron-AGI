@@ -7,8 +7,8 @@ manifold fix : PatchSpace {
     entanglement_bound <= 0.15
 }
 
-gate syntax_valid(m) : ast_check(m.files) == true
-gate tests_passing(m) : pytest_run(m.targets) == true and not m.has_regressions
+gate syntax_valid(m) : ast_check(p.files) == true
+gate tests_passing(m) : pytest_run(p.targets) == true and not p.has_regressions
 
 extern op read_file(m) deforms(none) commutes(all)
 extern op inspect_deps(m) deforms(none) commutes(all)

@@ -32,6 +32,14 @@ The following controls are enabled by default:
   raw stack trace in prompt history. The SQLite directive pool, stratified
   replay, and three-curve benchmark are local: no network or external model is
   used.
+- The offline A/B repair benchmark writes multi-file Python fixtures into
+  temporary workspaces, excludes tests and `conftest.py` from the edit
+  allowlist, clears stale bytecode before verifier runs, and restores byte
+  snapshots after failed gates. Its default router is local and deterministic;
+  live OpenAI-compatible routing requires both `--router openai` and
+  `--allow-live`. API keys are read from an environment variable and are never
+  written to benchmark reports. ColdSink reflex evidence remains append-only
+  and gated.
 - Gauge expressions are interpreted by a small tri-state evaluator. Python
   `eval()` is not used.
 - Synthesized operators are AST-restricted, benchmarked in an isolated

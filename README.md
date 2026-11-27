@@ -31,6 +31,7 @@ is opt-in.
 | 5 | Homeostatic thresholds, structural analogy, active probes, graceful unlearning, user co-adaptation | working (`core/plasticity.py`) |
 | 1–3 | Three-pillar adaptability: TTA surprise/patience, continual stratified replay, meta-transfer directive pool | working (`core/adaptability.py`, `gauge/synthesizer.py`, `llm/router.py`, `session.py`) |
 | 4 | Three offline adaptation curves: discovery@k, zero-regression retention, cold-start eta_cog | working (`tests/test_adaptability_bench.py`) |
+| A/B | Real multi-file repair benchmark: offline/live router seam, discovery@k, zero-forgetting retention, repeat-task reflex speedup | working (`bench/`, `docs/benchmark.md`) |
 | 4 | **Gauge frontend**: lexer, spans, AST, parser, static checker, IR, compiler | working (`gauge/`, `examples/`, `docs/gauge.md`) |
 | 4 | **Hybrid Thermodynamic VM**: real sink/backend/governor/gates/registry | working (`gauge/vm.py`) |
 | 4 | **Validated operator synthesis**: offline default, stratified replay, positive `eta_cog` gain, no historical gate regression | working (`gauge/synthesizer.py`) |
@@ -80,11 +81,22 @@ early_agi/
 ├── llm/
 │   ├── client.py           # stdlib OpenAI-compatible chat client
 │   └── router.py           # fast executor / deep reasoner + scripted stand-in
+├── bench/
+│   ├── contracts.py        # PatchRequest / PatchResponse router seam
+│   ├── fixtures.py         # real multi-file Python bug repositories
+│   ├── routers.py          # deterministic offline + opt-in live routers
+│   ├── gates.py            # transactional IO, pytest gates, Gauge orchestration
+│   ├── records.py          # immutable attempt/task/arm report records
+│   ├── metrics.py          # discovery, retention, and reflex curves
+│   ├── runner.py           # task engine, ColdSink reflexes, retention replay
+│   ├── cli.py              # python -m early_agi.bench stress runner
+│   └── netron_plastic.gauge # packaged copy of the plastic Gauge program
 ├── config.py               # strict env + .env wiring and runtime builder
 └── session.py              # per-turn transactional loop over a real repository
 
 examples/netron_solve.gauge  # canonical Gauge program
 docs/gauge.md                # language, VM, safety, and mapping documentation
+docs/benchmark.md            # offline/live A/B repair benchmark guide
 ```
 
 ## Install
@@ -138,6 +150,23 @@ compilation replaying a learned fix with zero router calls, and a bounded-χ
 factorization/block-Gibbs backend exercise. `--backend` or `EARLY_AGI_BACKEND`
 selects the relaxation backend used by the kernel, MERA graph, and Gauge runtime.
 
+## Run the A/B repair benchmark
+
+```bash
+python -m early_agi.bench --tasks 10 --k 4 --timeout 60 --output bench-ab.json
+python -m early_agi.bench --tasks 5 --k 3 --compact      # faster smoke
+```
+
+This is the empirical stress companion to the fast, exactly-three-curve
+`tests/test_adaptability_bench.py` smoke check. It writes real multi-file Python
+bug fixtures, runs local pytest gates, and compares a plain retry-loop baseline
+with `netron_plastic.gauge` + `bounded_chi` + `ReflexLibrary`. The JSON report
+logs cumulative `discovery@k`, sequential zero-forgetting retention, repeat-task
+reflex speedups, real `eta_cog`, tokens, rollbacks, and gate constraints. The
+default router is deterministic and offline; no network or external model call
+is made. See [docs/benchmark.md](docs/benchmark.md) for the router seam, live
+opt-in command, fixture safety model, and architectural boundaries.
+
 ### Live models
 
 Live dual-tier routing is disabled by default. Copy `.env.example` to `.env` or
@@ -155,7 +184,9 @@ Invalid numeric configuration fails fast. `EARLY_AGI_BACKEND`,
 `EARLY_AGI_CHI_MAX`, `EARLY_AGI_TAU`, `EARLY_AGI_ETA_HIGH`,
 `EARLY_AGI_ETA_MIN`, `EARLY_AGI_SINK`, `EARLY_AGI_MERA`,
 `EARLY_AGI_DIRECTIVE_DB`, and `EARLY_AGI_MAX_FILES` are wired into
-`Settings.build_runtime()`, the directive pool, and the demo.
+`Settings.build_runtime()`, the directive pool, and the demo. The A/B benchmark
+reuses the same client but keeps live routing behind both
+`--router openai` and `--allow-live`; its default path remains fully offline.
 
 ```python
 from early_agi.config import Settings
@@ -252,13 +283,26 @@ rate, manual overrides, prompt length, and autonomy policy in `user_feedback`.
 `tests/test_adaptability_bench.py` measures exactly three local curves without
 external APIs. `examples/netron_plastic.gauge` demonstrates the Gauge syntax.
 
+**Empirical A/B harness.** `early_agi/bench/` is split into focused contract,
+fixture, router, gate, record, metric, runner, and CLI modules, keeping every
+source file below the old `vm.py` monolith threshold. It adds no second surprise
+or novelty state: the Netron arm consumes the existing homeostatic governor and
+Gauge plastic program, while the baseline uses the same `eta_cog` cost formula
+with fixed thresholds. ColdSink schema, AST coupling, and THRML seams stay
+unchanged; benchmark scoping lives in temporary workspace payloads and sink
+metadata. The fast three-curve pytest smoke remains a synthetic unit check, and
+the CLI stress runner is the path for real multi-file discovery@k, sequential
+zero-forgetting, and repeat-task reflex measurements. See
+[docs/benchmark.md](docs/benchmark.md).
+
 ## Limitations
 
 - `run_shell` is disabled by default. When explicitly enabled, it executes in
   the repository with a timeout; that is process containment, **not** a security
   sandbox. `pytest`/`ruff` subprocess verifiers have the same trust boundary.
 - Token cost is taken from the provider's `usage` field; there is no currency
-  budgeting yet.
+  budgeting yet. The offline A/B router uses deterministic character-based
+  estimates; a live local-model run is required to claim model-quality gains.
 - Semantic shift validation is deliberately conservative: an invariant that
   references unavailable values is accepted structurally, never treated as a
   verified pass.

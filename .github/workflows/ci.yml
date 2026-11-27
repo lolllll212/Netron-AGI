@@ -30,6 +30,8 @@ jobs:
         run: python -m pytest
       - name: Demo (offline, no API key)
         run: python -m early_agi.demo
+      - name: Offline A/B benchmark CLI
+        run: python -m early_agi.bench --help
       - name: Demo (bounded-χ CLI selector)
         run: python -m early_agi.demo --backend bounded_chi --no-dotenv
       - name: Demo (EARLY_AGI_BACKEND selector)
@@ -98,8 +100,8 @@ jobs:
         run: |
           python -m pip install build
           python -m build
-      - name: Wheel contains py.typed
-        run: python -c "import zipfile,glob; z=zipfile.ZipFile(glob.glob('dist/*.whl')[0]); n=z.namelist(); assert any(p.endswith('py.typed') for p in n), n"
+      - name: Wheel contains py.typed and packaged Gauge program
+        run: python -c "import zipfile,glob; z=zipfile.ZipFile(glob.glob('dist/*.whl')[0]); n=z.namelist(); assert any(p.endswith('py.typed') for p in n), n; assert 'early_agi/bench/netron_plastic.gauge' in n, n"
       - uses: actions/upload-artifact@v4
         with:
           name: dist

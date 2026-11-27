@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Added `early_agi/bench/`: a focused offline/live A/B repair benchmark with real multi-file Python bug fixtures, a pluggable `PatchRouter` seam, deterministic offline and opt-in OpenAI-compatible routers, transactional workspace gates, `netron_plastic.gauge` + `bounded_chi` orchestration, `ReflexLibrary` replay, and a `python -m early_agi.bench` stress CLI. It reports discovery@k, sequential zero-forgetting retention, repeat-task reflex speedup, real `eta_cog`, tokens, rollbacks, and gate constraints.
+- Added `tests/test_ab_benchmark.py` covering the three A/B curves, offline/no-network execution, real fixture failure-to-fix gates, the live router prompt seam, and the packaged Gauge program.
+- Added `docs/benchmark.md` and the `early-agi-bench` console script; packaged `early_agi/bench/netron_plastic.gauge` as wheel data and documented the CLI in README, Gauge docs, and SECURITY.
 - Added `early_agi/core/adaptability.py`: minimal pytest/Z3 failure-to-constraint distillation, stratified ColdSink episode sampling, scale-invariant topology signatures, a SQLite-backed `DirectivePool`, and exactly three offline benchmark curves.
 - Added `tests/test_adaptability_bench.py` and `tests/test_adaptability.py` covering discovery@k under mid-task shift, zero-regression retention across 10 sequential tasks, cold-start `eta_cog` transfer on unseen topologies, and the three integration pillars.
 - Added `early_agi/core/plasticity.py`: NumPy-only `AdaptiveThresholds` / `HomeostaticRegulator`, structural `AnalogicalMatcher`, `AutonomyProfile` / `UserCoAdapter`, and `SynapticDecay` with fast weights.
@@ -34,6 +37,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The A/B benchmark keeps architectural boundaries explicit: no duplicate surprise/novelty tracker, no ColdSink schema migration, no AST-coupling rewrite, and no THRML import; benchmark scoping lives in temporary payloads/sink metadata and the existing `core/governor.py` + `core/plasticity.py` state remains the single source of truth.
+- CI now smokes `python -m early_agi.bench --help`, and the wheel check verifies that the packaged `netron_plastic.gauge` program is included.
 - `ThermodynamicGovernor` keeps fixed thresholds by default and, when plasticity is enabled, derives live `eta_min`, `eta_high`, `tau`, `chi_max`, novelty, exploration patience, crystallization bias, and probe policy from surprise, analogy similarity, and risk.
 - `EarlyAGIKernel.tick()` accepts `predicted_drop`, `analogy_similarity`, `risk_level`, and `probe_completed`, persists plasticity checkpoints, and releases probe locks after read-only measurements; `engage_probe_lock()` enforces READ/VERIFY-only registry access.
 - `GaugeVM` emits a preflight `EPISTEMIC_PROBE` after setup and before any mutating body op; `GATE_PROJECT` distills failed gates into active manifold constraints for the next tick.
@@ -48,6 +53,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `examples/netron_plastic.gauge` now evaluates `ast_check(p.files)`, `pytest_run(p.targets)`, and `p.has_regressions` against the candidate view, so the plastic example verifies real workspace files instead of returning unverifiable gates on the manifold object.
+- The A/B benchmark removes stale `__pycache__` before local verifier runs, preventing full-file fixture edits from being shadowed by bytecode compiled before the patch.
 - Gauge `recall sink` now includes `gauge_collapse` records regardless of the infrared collapse scale, so `collapse -> sink` can be replayed on later ticks.
 - Enforced the brief file allowlist in both live-router parsing and the session write path.
 - Made edit batches transactional: partial write failures restore workspace bytes, kernel checkpoints, gate state, and registry bookkeeping.
