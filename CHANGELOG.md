@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Offline demo output now uses ASCII `bounded-chi` display labels so redirected
+  Windows cp1252 stdout does not raise `UnicodeEncodeError`. Added full demo
+  subprocess regression coverage for default, CLI and environment backends
+  under strict cp1252 encoding; no UTF-8 environment workaround is required.
+
 ### Added
 
 - Upgrade 2: additive scoped ColdSink v3 WAL storage, expiring branch leases and

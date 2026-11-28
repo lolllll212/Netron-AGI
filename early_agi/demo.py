@@ -278,7 +278,8 @@ def reflex_compilation(settings: Settings | None = None) -> None:
 def backend_showcase(settings: Settings | None = None) -> None:
     """Exercise the bounded-χ backend and its optional thermodynamic seam."""
     settings = settings or Settings.from_env()
-    section("7. Backend seams: bounded-χ truncation and thermodynamic sampling")
+    # Keep human-readable labels printable in redirected Windows cp1252 output.
+    section("7. Backend seams: bounded-chi truncation and thermodynamic sampling")
     selected = get_backend(settings.backend)
     bounded = get_backend("bounded_chi")
     rng = np.random.default_rng(7)
@@ -308,8 +309,8 @@ def backend_showcase(settings: Settings | None = None) -> None:
             "available": list(available_backends()),
         },
     )
-    show("bounded-χ factorization", factor.as_dict())
-    show("bounded-χ entanglement", report.as_dict())
+    show("bounded-chi factorization", factor.as_dict())
+    show("bounded-chi entanglement", report.as_dict())
     show("block-Gibbs sample", sample.as_dict())
     show("THRML adapter", bounded.thrml_adapter().as_dict())
 

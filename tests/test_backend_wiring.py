@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -123,7 +125,7 @@ def test_demo_showcase_uses_environment_selector_and_cli_exposes_backend(
     captured = capsys.readouterr().out
     assert "Backend seams" in captured
     assert '"settings": "bounded_chi"' in captured
-    assert "bounded-χ factorization" in captured
+    assert "bounded-chi factorization" in captured
     assert "block-Gibbs sample" in captured
 
     with pytest.raises(SystemExit) as exc:
@@ -139,3 +141,28 @@ def test_optional_thrml_extra_is_declared_without_hard_dependency() -> None:
     pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert 'dependencies = ["numpy>=1.24"]' in pyproject
     assert 'thrml = ["thrml>=0.1.4"]' in pyproject
+
+
+@pytest.mark.parametrize("selector", ["default", "cli", "environment"])
+def test_full_demo_with_windows_redirected_output_encoding(tmp_path: Path, selector: str) -> None:
+    """Exercise real stdout encoding, not pytest's Unicode capture stream."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("EARLY_AGI_")}
+    env["PYTHONIOENCODING"] = "cp1252:strict"
+    # Running from a throwaway cwd avoids local .env/database state. Explicit
+    # paths also support source checkouts without an editable installation.
+    env["PYTHONPATH"] = os.pathsep.join([str(REPO_ROOT), *sys.path])
+    command = [sys.executable, "-m", "early_agi.demo", "--no-dotenv"]
+    if selector == "cli":
+        command.extend(["--backend", "bounded_chi"])
+    elif selector == "environment":
+        env["EARLY_AGI_BACKEND"] = "bounded_chi"
+    completed = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, timeout=120)
+    stdout = completed.stdout.decode("cp1252")
+    stderr = completed.stderr.decode("cp1252", errors="replace")
+    assert completed.returncode == 0, stderr
+    assert "7. Backend seams: bounded-chi" in stdout
+    assert "bounded-chi factorization" in stdout
+    assert "bounded-chi entanglement" in stdout
+    assert "Done. Try --backend bounded_chi" in stdout
+    backend = "classical_svd" if selector == "default" else "bounded_chi"
+    assert f'"settings": "{backend}"' in stdout
