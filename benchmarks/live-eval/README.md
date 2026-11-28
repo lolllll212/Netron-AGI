@@ -132,3 +132,57 @@ smoke JSON shows a successful task, not merely a successful HTTP response.
   or incomplete runs. A completed smoke run returns 0 but valid_comparison=false.
 - Progress/JSON omit credentials and prompt bodies. Still review artifacts before
   publishing; unresolved token reservations are not confirmed billed usage.
+
+## Schema v3: common external scoring and terminal telemetry
+
+Live headlines no longer compare Gauge's stateful marginal progress with the
+baseline's stateless gate credit. All arms receive **one fixed six-unit task
+completion credit** only when a passing repair closes both `syntax_valid` and
+`tests_passing`. Partial/failed tasks get zero. This is a scoring convention,
+not physical entropy measured from a task's initial state.
+
+The common resource-normalized score is:
+
+```
+eta = verified_task_bits / (0.001 * total_tokens + 0.0001 * latency_ms + tool_cost)
+```
+
+Costs accumulate across every failed attempt and every speculative candidate,
+including losing branches. Tools use the same base attempt cost model for all
+arms; latency uses provider latency plus the standardized external grading
+charge. Read-only Gauge preflight/internal control penalties do not change this
+external numerator or denominator. Therefore this is **not an all-in wall-clock
+performance measure**, nor a dollar-saving claim. Internal governance efficiency
+is preserved separately under each task/attempt's `governance` object and in
+`overall_mean_governance_eta_cog`; the controller itself is not rewritten.
+
+Reports expose `first_pass_mean_eta_cog`, `second_pass_mean_eta_cog`, and
+`overall_mean_eta_cog`, including failed tasks as zeros and repeat/reflex tasks.
+`mean_eta_cog` now aliases the overall external mean. Attempt scores and curves
+are external too; the task score credits completion once over cumulative cost.
+Normalized constraints omit blanks. `preflight_probe` denotes the task's actual
+preflight (not an inner VM's probe); exact replay with no preflight reports false.
+A gate-complete passing attempt reports terminal `CRYSTALLIZE`, while the raw
+internal directive remains in `governance.directive`.
+
+A zero-token successful reflex pass is reported as
+`second_pass_zero_token_replay: true` and `second_pass_token_speedup: null`, not
+a finite ratio made by replacing a zero denominator with one.
+
+Re-score an existing report **offline**, without overwriting the original:
+
+```powershell
+python -m early_agi.bench.rescore_live benchmarks/live-eval/nemotron-small.json --output benchmarks/live-eval/nemotron-small-rescored.json
+```
+
+Reanalysis preserves task outcomes, token usage, validity flags and raw controller
+scores. It does not rerun external tests or contact NIM, and is labeled with its
+source schema and provenance. Do not present it as a new experiment.
+
+For the full live pack use `--task-limit 8` (or omit the limit), not `--tasks 8`:
+`--tasks` configures the older offline benchmark. Use `--deep-model` for the
+reframer ID. Verify both account-visible model IDs and choose the executor before
+launching a paid run. The eight-task pack includes three correlated invariant
+variants. A stronger model may solve all of them without a stall; never force a
+worse baseline or grant hidden fixes just to obtain `races > 0`. Real escalation
+and reframing benefit remain unverified until recorded in a live ledger.

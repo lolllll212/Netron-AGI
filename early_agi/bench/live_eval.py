@@ -25,6 +25,7 @@ from .escalation import StallTracker
 from .fixtures import builtin_fixtures, hard_stall_fixtures, tangled_fixtures
 from .gates import apply_edits
 from .live_monitor import LiveMonitor, checkpoint, stderr_progress
+from .metrics import LIVE_SCORING, live_efficiency_summary, score_live_task
 from .records import ArmState, AttemptExecution
 from .routers import OpenAICompatiblePatchRouter
 from .runner import ABBenchmark
@@ -242,7 +243,8 @@ def run_live_evaluation(
     pacer = RequestPacer(rpm_limit)
     pack = tuple(fixtures or evaluation_pack())[:task_limit]
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
+        "scoring": LIVE_SCORING,
         "offline": False,
         "status": "running",
         "valid_comparison": False,
@@ -277,14 +279,9 @@ def run_live_evaluation(
             "planned_tasks": len(pack) * passes,
             "races": benchmark.races,
             "solve_rate": sum(r["success"] for r in first) / max(1, len(first)),
-            "mean_eta_cog": sum(r["eta_cog"] for r in first) / max(1, len(first)),
+            **live_efficiency_summary(records),
             "rollbacks": benchmark.rollback_events,
             "second_pass_reflex_hits": sum(r["reflex_hit"] for r in second),
-            "second_pass_token_speedup": (
-                sum(r["tokens"] for r in first) / max(1, sum(r["tokens"] for r in second))
-            )
-            if second
-            else None,
         }
 
     try:
@@ -360,7 +357,7 @@ def run_live_evaluation(
                             root=root,
                             first_seen=index < len(pack),
                         )
-                        records.append(task.as_dict())
+                        records.append(score_live_task(task.as_dict()))
                         monitor.emit(
                             "task_complete", success=task.success, tokens=task.tokens, reflex=task.reflex_hit
                         )

@@ -257,3 +257,119 @@ def repeat_curve(baseline: ArmState, netron: ArmState) -> dict[str, Any]:
         "rollbacks_avoided": sum(plain_rollbacks) - sum(netron_rollbacks),
         "eta_cog_gain": round(mean(netron_eta) - mean(plain_eta), 6),
     }
+
+
+# Live evaluation scoring is intentionally separate from build_report(): the
+# deterministic two-arm report remains byte-compatible with its published lock.
+LIVE_SCORING = {
+    "name": "external_task_v1",
+    "formula": "verified_task_bits / (0.001*tokens + 0.0001*latency_ms + tool_cost)",
+    "verified_task_bits": 6.0,
+    "required_gates": ["syntax_valid", "tests_passing"],
+    "credit": "one fixed six-unit completion credit per fully verified task; zero for partial/failed tasks",
+    "cost": "sum all candidate costs, including failures and pruned branches; exclude internal Gauge penalties",
+    "latency": "provider latency plus standardized external grader charge; not end-to-end wall-clock speed",
+    "mean_eta_cog_alias": "overall_mean_eta_cog",
+}
+
+
+def _live_closed(attempt: Mapping[str, Any]) -> bool:
+    return bool(
+        attempt.get("passed")
+        and not attempt.get("error")
+        and all(attempt.get("gates", {}).get(gate) == "pass" for gate in LIVE_SCORING["required_gates"])
+    )
+
+
+def _live_cost(attempts: Sequence[Mapping[str, Any]]) -> dict[str, float]:
+    tokens = sum(float(a.get("tokens", 0)) for a in attempts)
+    latency = sum(float(a.get("cost", {}).get("latency_ms", a.get("latency_ms", 0))) for a in attempts)
+    tools = sum(float(a.get("cost", {}).get("tool_cost", 0)) for a in attempts)
+    return {
+        "tokens": tokens,
+        "latency_ms": latency,
+        "tool_cost": tools,
+        "weighted_cost": 0.001 * tokens + 0.0001 * latency + tools,
+    }
+
+
+def score_live_task(task: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize a live task without mutating its internal controller evidence.
+
+    Six units are a fixed benchmark completion convention, not a measurement of
+    physical entropy or an assertion that the starting code failed both gates.
+    The same resource model applies to every arm, including exact reflex replay.
+    """
+    import copy
+
+    result = copy.deepcopy(dict(task))
+    if "governance" not in result:
+        result["governance"] = {
+            "eta_cog": result.get("eta_cog", 0),
+            "eta_cog_curve": result.get("eta_cog_curve", []),
+        }
+    preflight = result.get("preflight") or {}
+    preflight["constraints"] = list(
+        dict.fromkeys(str(c).strip() for c in preflight.get("constraints", []) if str(c).strip())
+    )
+    if result.get("preflight") is not None:
+        result["preflight"] = preflight
+    attempts = result.get("attempts", [])
+    curve = []
+    for index, attempt in enumerate(attempts):
+        if "governance" not in attempt:
+            attempt["governance"] = {
+                key: attempt.get(key)
+                for key in ("eta_cog", "verified_drop_bits", "directive", "preflight_probe")
+            }
+        attempt["constraints"] = list(
+            dict.fromkeys(str(c).strip() for c in attempt.get("constraints", []) if str(c).strip())
+        )
+        attempt["preflight_probe"] = bool(index == 0 and not attempt.get("reflex") and preflight.get("probe"))
+        closed = _live_closed(attempt)
+        if closed:
+            attempt["directive"] = "CRYSTALLIZE"
+        bits = 6.0 if closed else 0.0
+        attempt["verified_drop_bits"] = bits
+        own_cost = _live_cost([attempt])
+        attempt["external_cost"] = own_cost
+        attempt["eta_cog"] = round(bits / max(1e-9, own_cost["weighted_cost"]), 6)
+        prefix = attempts[: index + 1]
+        prefix_bits = 6.0 if any(_live_closed(a) for a in prefix) else 0.0
+        curve.append(round(prefix_bits / max(1e-9, _live_cost(prefix)["weighted_cost"]), 6))
+    cost = _live_cost(attempts)
+    bits = 6.0 if result.get("success") and any(_live_closed(a) for a in attempts) else 0.0
+    result.update(
+        {
+            "scoring": "external_task_v1",
+            "verified_task_bits": bits,
+            "external_cost": cost,
+            "eta_cog": round(bits / max(1e-9, cost["weighted_cost"]), 6),
+            "eta_cog_curve": curve,
+        }
+    )
+    return result
+
+
+def live_efficiency_summary(tasks: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Expose first-pass, repeat-pass and overall means without dropping failures."""
+    first = [t for t in tasks if t.get("first_seen")]
+    second = [t for t in tasks if not t.get("first_seen")]
+    overall = round(mean([float(t["eta_cog"]) for t in tasks]), 6)
+    first_tokens = sum(int(t.get("tokens", 0)) for t in first)
+    second_tokens = sum(int(t.get("tokens", 0)) for t in second)
+    return {
+        "mean_eta_cog": overall,
+        "first_pass_mean_eta_cog": round(mean([float(t["eta_cog"]) for t in first]), 6),
+        "overall_mean_eta_cog": overall,
+        "second_pass_mean_eta_cog": round(mean([float(t["eta_cog"]) for t in second]), 6) if second else None,
+        "overall_mean_governance_eta_cog": round(
+            mean([float(t.get("governance", {}).get("eta_cog", 0)) for t in tasks]), 6
+        ),
+        "first_pass_tokens": first_tokens,
+        "second_pass_tokens": second_tokens,
+        "second_pass_token_speedup": first_tokens / second_tokens if second_tokens else None,
+        "second_pass_zero_token_replay": bool(
+            second and second_tokens == 0 and all(t.get("success") and t.get("reflex_hit") for t in second)
+        ),
+    }

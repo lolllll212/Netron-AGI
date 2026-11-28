@@ -139,3 +139,39 @@ def test_cli_live_dispatch_requires_opt_in_and_writes_ledger(tmp_path, monkeypat
     assert json.loads(target.read_text()) == {"offline": False, "status": "completed"}
     assert run.call_args.kwargs["max_workers"] == 2
     assert run.call_args.kwargs["rpm_limit"] == 40
+
+
+def test_live_report_uses_external_scores_and_honest_reflex_telemetry():
+    fixture = builtin_fixtures()[0]
+
+    def transport(request, **kwargs):
+        edits = [{"path": e.path, "content": e.content} for e in fixture.fix_candidate.edits]
+        return io.BytesIO(
+            json.dumps(
+                {
+                    "choices": [{"message": {"content": json.dumps({"edits": edits})}}],
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 100},
+                }
+            ).encode()
+        )
+
+    with patch("urllib.request.urlopen", side_effect=transport), patch("time.sleep"):
+        report = run_live_evaluation(
+            endpoint="https://mock/v1", api_key="mock", model="fast", deep_model="deep", fixtures=[fixture]
+        )
+    assert report["schema_version"] == 3
+    for arm in report["arms"].values():
+        assert arm["mean_eta_cog"] == arm["overall_mean_eta_cog"]
+        assert "first_pass_mean_eta_cog" in arm
+        for task in arm["tasks"]:
+            assert task["verified_task_bits"] == 6
+            for attempt in task["attempts"]:
+                assert attempt["directive"] == "CRYSTALLIZE"
+                assert attempt["verified_drop_bits"] == 6
+                assert "governance" in attempt
+                assert not any(not c.strip() for c in attempt["constraints"])
+                if task["preflight"] is None:
+                    assert attempt["preflight_probe"] is False
+    for name in ("netron_plastic", "netron_race"):
+        assert report["arms"][name]["second_pass_zero_token_replay"]
+        assert report["arms"][name]["second_pass_token_speedup"] is None

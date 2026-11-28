@@ -170,3 +170,15 @@ The deterministic agent loop, end to end.
 - Added `--smoke` (one task/pass/arm/candidate), task/pass/arm selectors, and schema
   v2 completion/validity metadata so connection failures are not published as
   model-performance comparisons. Checkpoints preserve results but do not resume.
+
+### Live scoring and telemetry correction
+
+- Added schema v3 resource-normalized external task scoring shared by every live
+  arm, with fixed end-to-end gate-completion credit and cumulative failure/branch
+  costs. Report first-pass and overall means, including reflex replay; preserve
+  original Gauge governance scores/directives separately. Offline parity is unchanged.
+- Removed blank live constraints and stale task-preflight flags; closed passing
+  attempts expose terminal CRYSTALLIZE. Zero-token reflex replay no longer yields
+  an invented finite token-speedup ratio.
+- Added an offline re-scoring command preserving source evidence and experiment
+  validity flags, without overwriting the original report or making API calls.
