@@ -1,4 +1,7 @@
 // Offline fixture strategies; pass GaugeVM(race_config=...) to execute.
+// The benchmark first uses the sequential/reflex path and enters this
+// frustration handler only after failed progress with a governance stall.
+// A due trap alone is not a claim that racing will save tokens.
 scale L0 -> L2
 
 manifold fix : PatchSpace {

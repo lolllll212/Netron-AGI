@@ -22,6 +22,13 @@ def _parser() -> argparse.ArgumentParser:
         prog="early-agi-bench",
         description="Run local multi-file repair A/B curves and a repeat-task reflex stress test.",
     )
+    parser.add_argument("--live-eval", action="store_true", help="run the explicit eight-task live pack")
+    parser.add_argument("--deep-model", default=os.getenv("EARLY_AGI_DEEP_MODEL", ""))
+    parser.add_argument("--verify-models", action="store_true")
+    parser.add_argument("--max-workers", type=int, default=2)
+    parser.add_argument("--rpm-limit", type=float, default=40)
+    parser.add_argument("--max-tokens", type=int, default=2048)
+    parser.add_argument("--token-budget", type=int, default=200000)
     parser.add_argument("--tasks", type=int, default=10, help="sequential tasks (default: 10)")
     parser.add_argument("--k", type=int, default=4, help="maximum patch attempts per task (default: 4)")
     parser.add_argument(
@@ -67,7 +74,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--base-url",
-        default=os.getenv("EARLY_AGI_BASE_URL", DEFAULT_BASE_URL),
+        default=os.getenv("EARLY_AGI_BASE_URL", os.getenv("OPENAI_BASE_URL", DEFAULT_BASE_URL)),
         help="OpenAI-compatible base URL for --router openai",
     )
     parser.add_argument(
@@ -103,6 +110,31 @@ def _write(text: str, output: str | None) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.live_eval:
+        if not args.allow_live or not args.deep_model or not args.output:
+            parser.error("--live-eval requires --allow-live, --deep-model and --output")
+        from .live_eval import run_live_evaluation
+
+        key = os.getenv(args.api_key_env, "") or os.getenv("NVIDIA_API_KEY", "")
+        if not key:
+            parser.error("set the API key environment variable locally")
+        report = run_live_evaluation(
+            endpoint=args.endpoint or args.base_url,
+            api_key=key,
+            model=args.model,
+            deep_model=args.deep_model,
+            k=args.k,
+            max_tokens=args.max_tokens,
+            token_budget=args.token_budget,
+            rpm_limit=args.rpm_limit,
+            max_workers=args.max_workers,
+            verify_models=args.verify_models,
+            timeout=args.timeout,
+        )
+        _write(_dump(report, compact=args.compact), args.output)
+        return 0
+    if args.verify_models:
+        parser.error("--verify-models requires --live-eval")
     if args.router == "openai" and not args.allow_live:
         parser.error("--router openai requires --allow-live")
     if args.race and args.router == "openai":
@@ -110,10 +142,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     router = None
     if args.router == "openai":
+        from ..llm.pacing import RequestPacer
+
         router = OpenAICompatiblePatchRouter(
             base_url=args.endpoint or args.base_url,
             model=args.model,
-            api_key=os.getenv(args.api_key_env, ""),
+            api_key=os.getenv(args.api_key_env, "") or os.getenv("NVIDIA_API_KEY", ""),
+            max_tokens=args.max_tokens,
+            pacer=RequestPacer(args.rpm_limit),
             timeout_s=args.timeout,
             enabled=True,
         )

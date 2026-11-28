@@ -181,10 +181,11 @@ def test_race_benchmark_three_arm_offline_smoke(monkeypatch):
     assert report["summary"]["offline"]
     assert report["summary"]["netron_race_solved"] == 4
     assert report["summary"]["zero_regression"]
-    assert report["summary"]["branch_race_pruned_branches"] == 12
-    assert report["summary"]["branch_race_lineage_edges"] == 24
+    assert report["summary"]["branch_race_pruned_branches"] == 0
+    assert report["summary"]["netron_race_tokens_saved"] > 0
+    assert report["summary"]["branch_race_lineage_edges"] == 0
     curves = report["curves"]["branch_race"]
-    assert curves["executors"] == ["process"] * 4
+    assert curves["executors"] == []
     assert all(curves["green_winners"])
     assert curves["network_calls"] == 0
     assert "/tmp/" not in json.dumps(report)

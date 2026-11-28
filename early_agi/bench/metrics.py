@@ -89,7 +89,7 @@ def build_race_report(
     summaries = [dict(item) for item in race_summaries]
     race_zero_regression = all(point.zero_regression for point in race_state.retention)
     report["config"]["netron_race"] = {
-        "controller": "parallel_wal_branch_race",
+        "controller": "stall_gated_parallel_wal_branch_race",
         "program": "RACE_BRANCHES",
         "gate": "ast_syntax_gate+pytest_gate",
         "trigger": "volume_law_or_frustration",
@@ -106,7 +106,7 @@ def build_race_report(
     }
     report["arms"]["netron_race"] = {
         **race_state.as_dict(),
-        "controller": "parallel_wal_branch_race",
+        "controller": "stall_gated_parallel_wal_branch_race",
         "race_summaries": summaries,
     }
     winner_eta = [float((item.get("winner") or {}).get("eta_cog", 0.0) or 0.0) for item in summaries]
@@ -115,7 +115,9 @@ def build_race_report(
     tokens = [int(item.get("total_tokens", 0)) for item in summaries]
     lineage = [int(item.get("lineage_edges", 0)) for item in summaries]
     report["curves"]["branch_race"] = {
-        "tasks": [task.task_index for task in race_state.tasks],
+        "tasks": [
+            task.task_index for task in race_state.tasks if task.preflight and "race" in task.preflight
+        ],
         "winner_eta_cog": [round(value, 6) for value in winner_eta],
         "winner_branch_ids": winner_branches,
         "pruned_branches": pruned,
@@ -133,7 +135,7 @@ def build_race_report(
     summary["netron_race_rollbacks_avoided"] = baseline.rollbacks - race_state.rollbacks
     summary["branch_race_pruned_branches"] = sum(pruned)
     summary["branch_race_lineage_edges"] = sum(lineage)
-    summary["branch_race_tokens"] = race_state.tokens_spent
+    summary["branch_race_tokens"] = sum(tokens)
     summary["zero_regression"] = bool(summary["zero_regression"] and race_zero_regression)
     summary["ok"] = bool(
         summary["ok"]

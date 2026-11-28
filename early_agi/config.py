@@ -166,11 +166,13 @@ class Settings:
                 "EARLY_AGI_FAST_MODEL",
                 "EARLY_AGI_DEEP_MODEL",
                 "EARLY_AGI_API_KEY",
+                "OPENAI_BASE_URL",
+                "NVIDIA_API_KEY",
             )
         )
         settings = cls(
-            base_url=_str(source, "EARLY_AGI_BASE_URL", DEFAULT_BASE_URL),
-            api_key=_str(source, "EARLY_AGI_API_KEY", ""),
+            base_url=_str(source, "EARLY_AGI_BASE_URL", _str(source, "OPENAI_BASE_URL", DEFAULT_BASE_URL)),
+            api_key=_str(source, "EARLY_AGI_API_KEY", _str(source, "NVIDIA_API_KEY", "")),
             fast_model=_str(source, "EARLY_AGI_FAST_MODEL", "fast-executor"),
             deep_model=_str(source, "EARLY_AGI_DEEP_MODEL", "deep-reasoner"),
             timeout_s=_float(source, "EARLY_AGI_TIMEOUT", 90.0, minimum=0.1),

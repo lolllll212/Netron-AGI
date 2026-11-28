@@ -166,3 +166,19 @@ routing cannot be combined with `--race`. Reports include winner eta, branch
 tokens, pruned counts, lineage, executor and sandbox modes. Parallel racing can
 spend more total tokens than serial baseline; a green report is not a claim of
 token savings. Use at least four tasks to exercise repeat/reflex report thresholds.
+
+### Path A update: escalation and live evaluation
+
+The offline race arm no longer forks unconditionally. It starts with an isolated
+copy of the same sequential Gauge/reflex controller. Only failed progress with a
+recall/shift directive or repeated identical failed gates permits an escalation,
+and branches consume the remaining candidate-turn budget. Previous successful
+race repairs are available for exact-prestate reflex replay. The race curves list
+only escalated tasks; `branch_race_tokens` excludes ordinary sequential tokens.
+The default two-arm JSON parity contract remains unchanged.
+
+The explicit `--live-eval --allow-live` path is separate from the offline fixture
+racer. It uses a shared pacer across threaded candidate generators, external
+pytest/AST grading, independent per-arm archives and identical token/turn caps.
+It currently does not emit live-branch WAL lineage. See
+[benchmarks/live-eval/README.md](../benchmarks/live-eval/README.md).

@@ -81,6 +81,7 @@ def test_race_vm_runs_offline(tmp_path):
             race_config=config,
         )
         vm.traps_runner.is_due = lambda event: True
+        vm.kernel.governor.recall_streak = 1
         result = vm.run(SOURCE, name="race.gauge")
         assert result.ok
         assert result.plasticity["branch_race"]["ok"]
@@ -105,3 +106,19 @@ def test_no_race_report_preserves_legacy_json():
     result = GaugeRunResult("halted", "empty", ".")
     assert result.races == []
     assert "races" not in result.as_dict()
+
+
+def test_due_trap_without_stall_does_not_fork():
+    from types import SimpleNamespace
+
+    from early_agi.gauge.instruction_parts.race import _RaceOps
+    from early_agi.gauge.ir import Instruction
+
+    runner = _RaceOps()
+    runner.vm = SimpleNamespace(
+        traps_runner=SimpleNamespace(is_due=lambda event: True),
+        kernel=SimpleNamespace(governor=SimpleNamespace(recall_streak=0)),
+    )
+    outcome = runner._op_race_branches({}, Instruction("RACE_BRANCHES"))
+    assert outcome["skipped"]
+    assert "stalled progress" in outcome["reason"]

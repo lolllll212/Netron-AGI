@@ -774,3 +774,69 @@ def tangled_fixtures() -> tuple[BugFixture, ...]:
         fix_index=2,
     )
     return (invoice, scheduler)
+
+
+def hard_stall_fixtures() -> tuple[BugFixture, ...]:
+    """Three-module reservation invariants with plausible one-sided repairs.
+
+    Candidates are available to every offline arm; live prompts never include
+    candidate patches. These are stress fixtures, not SWE-bench claims.
+    """
+    result = []
+    for package, scale in (("inventory", 1), ("wallet", 100), ("quota", 10)):
+        state = "def available(total, held):\n    return total\n"
+        reserve = "def reserve(total, held, amount):\n    return held + amount\n"
+        service = (
+            f"from {package}.state import available\n"
+            f"from {package}.reserve import reserve\n"
+            "def transact(total, held, amount):\n"
+            "    updated = reserve(total, held, amount)\n"
+            "    return available(total, updated), updated\n"
+        )
+        fixed_state = "def available(total, held):\n    return total - held\n"
+        fixed_reserve = (
+            "def reserve(total, held, amount):\n"
+            "    if amount < 0 or held + amount > total:\n"
+            "        raise ValueError('invalid reservation')\n"
+            "    return held + amount\n"
+        )
+        sources = {
+            f"{package}/state.py": state,
+            f"{package}/reserve.py": reserve,
+            f"{package}/service.py": service,
+        }
+        tests = (
+            f"import pytest\nfrom {package}.service import transact\n"
+            f"def test_existing_hold():\n    assert transact({10 * scale}, {2 * scale}, {3 * scale}) == ({5 * scale}, {5 * scale})\n"
+            f"def test_full():\n    assert transact({10 * scale}, 0, {10 * scale}) == (0, {10 * scale})\n"
+            f"@pytest.mark.parametrize('amount', [-1, {20 * scale}])\n"
+            f"def test_invalid(amount):\n    with pytest.raises(ValueError):\n        transact({10 * scale}, 0, amount)\n"
+        )
+        partial = PatchCandidate(
+            "projection_only",
+            (FileEdit(f"{package}/state.py", fixed_state),),
+            "Repair the visible balance projection",
+        )
+        validation = PatchCandidate(
+            "validation_only",
+            (FileEdit(f"{package}/reserve.py", fixed_reserve),),
+            "Enforce reservation boundaries",
+        )
+        complete = PatchCandidate(
+            "joint_invariant",
+            (*partial.edits, *validation.edits),
+            "Preserve projection and mutation invariants together",
+        )
+        result.append(
+            BugFixture(
+                id=f"hard_{package}",
+                task="Repair reservation accounting and invalid-operation behavior.",
+                files=_fixture_files(
+                    package=package, sources=sources, test_name="test_reservation.py", test_source=tests
+                ),
+                candidates=(partial, complete, validation),
+                probe_hint="",
+                fix_index=1,
+            )
+        )
+    return tuple(result)

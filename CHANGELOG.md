@@ -150,3 +150,13 @@ The deterministic agent loop, end to end.
 
 - Initial kernel sketch: cold sink, entropy sensor, governor, tick loop, and the
   swappable `RelaxationBackend` interface with a numpy SVD implementation.
+
+### Path A development
+
+- Added stall-gated offline racing with an independent sequential/reflex archive,
+  explicit failed-progress evidence, and retained failed-attempt token costs.
+- Split the offline racer behind its compatible facade into race models, sandbox
+  lifecycle and coordinator modules; added multi-module invariant stress fixtures.
+- Added NIM-compatible environment aliases, strict text roles, Retry-After/jitter
+  retries, shared pacing and an opt-in eight-task live evaluation command. Live
+  tests use mocked HTTP only. No live model performance claims or results.

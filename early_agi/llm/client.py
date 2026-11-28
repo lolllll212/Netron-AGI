@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 import time
 import urllib.error
 import urllib.request
@@ -11,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..config import DEFAULT_BASE_URL, Settings
+from .pacing import RequestPacer, retry_after
 
 __all__ = [
     "LLMError",
@@ -92,6 +94,22 @@ def extract_json(text: str) -> Any:
     raise LLMError(f"no JSON found in completion: {stripped[:200]!r}")
 
 
+def sanitize_messages(messages: Sequence[Mapping[str, str]]) -> list[dict[str, str]]:
+    """Map developer instructions to system; reject unsupported tool semantics."""
+    clean = []
+    for message in messages:
+        role = message.get("role", "")
+        role = "system" if role == "developer" else role
+        if role not in {"system", "user", "assistant"}:
+            raise LLMError(f"unsupported chat role: {role!r}")
+        if not isinstance(message.get("content"), str):
+            raise LLMError("chat content must be text")
+        if message.get("tool_calls") or message.get("function_call"):
+            raise LLMError("tool/function calls require an explicit text adapter")
+        clean.append({"role": role, "content": message["content"]})
+    return clean
+
+
 class OpenAICompatibleClient:
     """Synchronous chat-completions client with bounded retries."""
 
@@ -104,6 +122,7 @@ class OpenAICompatibleClient:
         timeout: float = 90.0,
         max_retries: int = 2,
         temperature: float = 0.0,
+        pacer: RequestPacer | None = None,
     ) -> None:
         self.model = model
         self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
@@ -111,6 +130,9 @@ class OpenAICompatibleClient:
         self.timeout = float(timeout)
         self.max_retries = max(0, int(max_retries))
         self.temperature = float(temperature)
+        self.pacer = pacer
+        self.rate_limit_retries = 0
+        self.requests_sent = 0
 
     @classmethod
     def from_settings(cls, tier: str = "fast", settings: Settings | None = None) -> OpenAICompatibleClient:
@@ -143,7 +165,7 @@ class OpenAICompatibleClient:
     ) -> LLMReply:
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": [dict(message) for message in messages],
+            "messages": sanitize_messages(messages),
             "temperature": self.temperature if temperature is None else float(temperature),
             "stream": False,
         }
@@ -161,13 +183,21 @@ class OpenAICompatibleClient:
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
             request = urllib.request.Request(self.endpoint, data=body, headers=headers, method="POST")
+            delay = 0.0
             try:
+                if self.pacer is not None:
+                    self.pacer.wait()
+                self.requests_sent += 1
                 with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
                     raw = json.loads(response.read().decode("utf-8"))
                 break
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", "backslashreplace")[:800]
                 last_error = LLMError(f"{self.endpoint} returned HTTP {exc.code}: {detail}")
+                delay = retry_after(exc.headers.get("Retry-After") if exc.headers else None)
+                if exc.code == 429 and attempt < self.max_retries:
+                    self.rate_limit_retries += 1
+                exc.close()
                 if exc.code < 500 and exc.code != 429:
                     raise last_error from exc
             except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
@@ -175,7 +205,7 @@ class OpenAICompatibleClient:
             except json.JSONDecodeError as exc:
                 last_error = LLMError(f"non-JSON response from {self.endpoint}: {exc}")
             if attempt < self.max_retries:
-                time.sleep(min(2.0, 0.25 * (2**attempt)))
+                time.sleep(max(delay, min(30.0, 0.5 * (2**attempt)) + random.uniform(0.0, 0.25)))
         else:
             assert last_error is not None
             raise last_error
@@ -193,6 +223,21 @@ class OpenAICompatibleClient:
             latency_ms=latency_ms,
             raw=raw,
         )
+
+    def verify_models(self, models: Sequence[str]) -> tuple[str, ...]:
+        """Explicit authenticated discovery; never invoked during construction."""
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        request = urllib.request.Request(f"{self.base_url}/models", headers=headers)
+        if self.pacer is not None:
+            self.pacer.wait()
+        self.requests_sent += 1
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        available = tuple(str(item["id"]) for item in data["data"])
+        missing = set(models) - set(available)
+        if missing:
+            raise LLMError(f"models not available: {sorted(missing)}")
+        return available
 
     def chat_json(
         self,

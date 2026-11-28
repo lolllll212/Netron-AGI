@@ -27,6 +27,9 @@ class _RaceOps:
                 "branches": list(branches),
                 "gates": list(gates),
             }
+        governor = self.vm.kernel.governor
+        if governor.recall_streak < 1:
+            return {"skipped": True, "reason": "race requires stalled progress (recall_streak >= 1)"}
         config: RaceConfig | None = getattr(self.vm, "race_config", None)
         if config is None:
             return {

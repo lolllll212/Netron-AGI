@@ -246,9 +246,15 @@ class DualTierRouter:
             raise LLMUnavailable(
                 "live routing is disabled; set EARLY_AGI_LLM_ENABLED=1 and the model/endpoint variables"
             )
+        fast = OpenAICompatibleClient.from_settings("fast", settings)
+        deep = OpenAICompatibleClient.from_settings("deep", settings)
+        if "integrate.api.nvidia.com" in settings.base_url:
+            from .pacing import RequestPacer
+
+            fast.pacer = deep.pacer = RequestPacer(40)
         return cls(
-            OpenAICompatibleClient.from_settings("fast", settings),
-            OpenAICompatibleClient.from_settings("deep", settings),
+            fast,
+            deep,
             directive_pool=DirectivePool(getattr(settings, "directive_path", ":memory:")),
         )
 

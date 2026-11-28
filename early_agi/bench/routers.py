@@ -8,6 +8,7 @@ endpoint without changing the benchmark runner.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
@@ -97,12 +98,25 @@ class OpenAICompatiblePatchRouter:
     timeout_s: float = 90.0
     temperature: float = 0.0
     enabled: bool = False
+    max_tokens: int = 4096
+    pacer: Any = field(default=None, repr=False)
+    rate_limit_retries: int = 0
+    requests_sent: int = 0
+    _telemetry_lock: Any = field(default_factory=threading.Lock, repr=False)
 
     name: ClassVar[str] = "openai_compatible_live"
 
     @property
     def offline(self) -> bool:
         return not self.enabled
+
+    def __post_init__(self):
+        from urllib.parse import urlsplit
+
+        if self.pacer is None and urlsplit(self.base_url).hostname == "integrate.api.nvidia.com":
+            from ..llm.pacing import RequestPacer
+
+            self.pacer = RequestPacer(40)
 
     def propose(self, request: PatchRequest) -> PatchResponse:
         if not self.enabled:
@@ -114,14 +128,20 @@ class OpenAICompatiblePatchRouter:
             base_url=self.base_url,
             api_key=self.api_key,
             timeout=self.timeout_s,
-            max_retries=0,
+            max_retries=2,
+            pacer=self.pacer,
             temperature=self.temperature,
         )
-        data, reply = client.chat_json(
-            request.messages(),
-            json_mode=True,
-            timeout=self.timeout_s,
-        )
+        try:
+            data, reply = client.chat_json(
+                request.messages(),
+                timeout=self.timeout_s,
+                max_tokens=self.max_tokens,
+            )
+        finally:
+            with self._telemetry_lock:
+                self.rate_limit_retries += client.rate_limit_retries
+                self.requests_sent += client.requests_sent
         edits = _edits_from_payload(data, request.allowed_paths)
         usage = dict(reply.usage)
         prompt_tokens = _nonnegative_int(usage.get("prompt_tokens"))

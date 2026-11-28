@@ -365,3 +365,18 @@ fixture configuration; the bare CLI safely skips an unconfigured race.
 `GaugeRunResult.races` exposes typed `GaugeRaceOutcome` audit records; JSON adds
 `races` only when an outcome exists, preserving legacy no-race output.
 See [Gauge](docs/gauge.md) and [benchmark](docs/benchmark.md) documentation.
+
+### Path A: gated racing and opt-in live evaluation
+
+The offline `--race` arm now starts on the sequential Gauge/reflex path and forks
+only on failed-progress stall evidence. The default four-task tangled run keeps
+the sequential arm's token savings rather than always paying for four branches.
+Repeated failed gate verdicts count as task-local frustration; provider errors
+alone do not trigger escalation. Race-recovered tasks can compile reflexes too.
+
+An experimental eight-task external-pytest/AST evaluation is available through
+`python -m early_agi.bench --live-eval --allow-live ...`. It supports NIM-compatible
+endpoints, explicit model discovery, two-worker live concurrency, shared RPM
+pacing, retry telemetry and token/turn reservations. It has **not been run live**.
+See [the live evaluation guide](benchmarks/live-eval/README.md) for credentials,
+budget controls, complete commands and methodological limitations.
