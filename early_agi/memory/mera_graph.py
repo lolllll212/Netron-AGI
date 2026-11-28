@@ -268,7 +268,8 @@ class MeraGraph:
         return digest
 
     def _load_analogies(self) -> None:
-        all_nodes = self.nodes()
+        # Keep historical patterns loaded; query-time filtering implements latest_only.
+        all_nodes = self.nodes(latest_only=False)
         ordered = [node for node in all_nodes if node["kind"] == "analogy"]
         ordered.extend(node for node in all_nodes if node["kind"] != "analogy")
         for node in ordered:
@@ -280,6 +281,7 @@ class MeraGraph:
             metadata = (
                 dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), Mapping) else {}
             )
+            metadata["node_hash"] = node["hash"]
             strategy = payload.get("decomposition_strategy")
             if isinstance(strategy, Mapping):
                 metadata.update(dict(strategy))
@@ -325,7 +327,7 @@ class MeraGraph:
             "metadata": meta,
         }
         digest = self.put_node("analogy", payload, scale=2, weight=1.0, signature=signature, strategy=meta)
-        self.analogies.register(pattern_id, signature, strategy_hint, meta)
+        self.analogies.register(pattern_id, signature, strategy_hint, {**meta, "node_hash": digest})
         return digest
 
     def best_analogy(

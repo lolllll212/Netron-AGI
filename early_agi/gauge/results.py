@@ -3,9 +3,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypedDict
 
-__all__ = ["GaugeRunResult"]
+__all__ = ["GaugeRaceOutcome", "GaugeRunResult"]
+
+
+class GaugeRaceOutcome(TypedDict):
+    """Stable public subset of a completed offline race's audit outcome."""
+
+    ok: bool
+    run_id: str
+    trigger: str
+    executor: str
+    winner_branch_id: str
+    winner_hash: str
+    branch_count: int
+    pruned_branches: int
+    total_tokens: int
+    lineage_edges: int
+    offline: bool
+    network_calls: int
 
 
 @dataclass
@@ -32,6 +49,8 @@ class GaugeRunResult:
     reflexes: dict[str, Any] = field(default_factory=dict)
     plasticity: dict[str, Any] = field(default_factory=dict)
 
+    races: list[GaugeRaceOutcome] = field(default_factory=list)
+
     @property
     def ok(self) -> bool:
         return self.status == "halted" and not self.violations
@@ -41,7 +60,7 @@ class GaugeRunResult:
         return self.synthesis
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "status": self.status,
             "ok": self.ok,
             "program": self.program,
@@ -65,3 +84,7 @@ class GaugeRunResult:
             "reflexes": self.reflexes,
             "plasticity": self.plasticity,
         }
+        # Keep legacy no-race JSON byte-compatible with the two-arm benchmark.
+        if self.races:
+            result["races"] = self.races
+        return result

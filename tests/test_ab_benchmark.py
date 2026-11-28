@@ -169,3 +169,22 @@ def test_packaged_plastic_program_matches_verified_example() -> None:
     assert resource.read_bytes() == example_path.read_bytes()
     assert "ast_check(p.files)" in packaged
     assert "pytest_run(p.targets)" in packaged
+
+
+def test_race_benchmark_three_arm_offline_smoke(monkeypatch):
+    from early_agi.bench import run_race_ab_benchmark
+
+    monkeypatch.setattr(socket.socket, "connect", _forbidden)
+    monkeypatch.setattr(urllib.request, "urlopen", _forbidden)
+    report = run_race_ab_benchmark(sequential_tasks=4, timeout_s=30, endpoint="mock://local", model="test")
+    assert report["summary"]["ok"]
+    assert report["summary"]["offline"]
+    assert report["summary"]["netron_race_solved"] == 4
+    assert report["summary"]["zero_regression"]
+    assert report["summary"]["branch_race_pruned_branches"] == 12
+    assert report["summary"]["branch_race_lineage_edges"] == 24
+    curves = report["curves"]["branch_race"]
+    assert curves["executors"] == ["process"] * 4
+    assert all(curves["green_winners"])
+    assert curves["network_calls"] == 0
+    assert "/tmp/" not in json.dumps(report)

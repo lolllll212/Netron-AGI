@@ -85,4 +85,23 @@ def test_race_vm_runs_offline(tmp_path):
         assert result.ok
         assert result.plasticity["branch_race"]["ok"]
         assert result.plasticity["branch_race"]["network_calls"] == 0
+        assert len(result.races) == 1
+        assert result.races[0]["winner_hash"] == vm.execution.variables["winner"]
+        assert result.as_dict()["races"] == result.races
         assert vm.execution.variables["winner"]
+
+
+def test_public_race_example_checks_and_compiles():
+    from pathlib import Path
+
+    source = Path("examples/netron_race.gauge").read_text(encoding="utf-8")
+    assert check_program(parse_program(source)).ok
+    assert "RACE_BRANCHES" in str(compile_program(source).as_dict())
+
+
+def test_no_race_report_preserves_legacy_json():
+    from early_agi.gauge.results import GaugeRunResult
+
+    result = GaugeRunResult("halted", "empty", ".")
+    assert result.races == []
+    assert "races" not in result.as_dict()

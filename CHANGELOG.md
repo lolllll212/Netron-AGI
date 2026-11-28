@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Upgrade 2: additive scoped ColdSink v3 WAL storage, expiring branch leases and
+  atomic single-winner commits; immutable MeraGraph SUPERSEDED/MERGED history.
+- Offline parallel branch racer with isolated worktrees/copies, gate-green eta
+  ranking, mocked transport and an opt-in third `--race` benchmark arm.
+- Gauge `race` primitive, `examples/netron_race.gauge`, and typed
+  `GaugeRunResult.races` outcomes (omitted from legacy no-race JSON).
+- Hardening tests for spawned four-process WAL contention, raw/compressed v2
+  migration, persisted lineage, real git-worktree teardown, all-fail source
+  immutability, mocked worker pickling and the three-arm benchmark. Explicit
+  Ubuntu/Windows CI coverage; default offline benchmark parity remains locked.
+
 - Added `benchmarks/structural-cleanup/`: the pre-refactor offline A/B JSON report and summary, the identical post-refactor report, explicit locked metrics in `parity.json`, and a stdlib-only `check_parity.py` verifier. Added `docs/architecture-boundaries.md` documenting the unchanged `ColdSink`, pure-Python AST coupling, and optional THRML seam contracts.
 - Added a byte-level equality assertion in `tests/test_ab_benchmark.py` so the packaged `early_agi/bench/netron_plastic.gauge` and `examples/netron_plastic.gauge` cannot silently drift.
 - Added `early_agi/bench/`: a focused offline/live A/B repair benchmark with real multi-file Python bug fixtures, a pluggable `PatchRouter` seam, deterministic offline and opt-in OpenAI-compatible routers, transactional workspace gates, `netron_plastic.gauge` + `bounded_chi` orchestration, `ReflexLibrary` replay, and a `python -m early_agi.bench` stress CLI. It reports discovery@k, sequential zero-forgetting retention, repeat-task reflex speedup, real `eta_cog`, tokens, rollbacks, and gate constraints.

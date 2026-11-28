@@ -341,3 +341,27 @@ pre-refactor report, the identical post-refactor report, and a checker for
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)
 - [License](LICENSE)
+
+## Upgrade 2: offline branch racing
+
+`ColdSink` v3 migrates v2 databases additively, retaining content hashes and
+append-only evidence while adding scoped commits, WAL concurrency and atomic
+single-winner branch leases. MeraGraph retains SUPERSEDED/MERGED lineage and
+supports latest-only or historical retrieval. Scope is not an authorization boundary.
+
+```sh
+python -m early_agi.bench --race --tasks 4 --k 4 --timeout 30 --compact
+python -m early_agi.gauge check examples/netron_race.gauge --no-dotenv
+```
+
+The opt-in third benchmark arm races isolated git worktrees (or temporary copies)
+and crystallises a gate-green highest-eta winner. `--endpoint mock://local` labels
+a **mocked, offline** transport; no live-model proof is claimed. Racing can spend
+more tokens than serial retry. Default two-arm benchmark output is unchanged.
+
+[`examples/netron_race.gauge`](examples/netron_race.gauge) shows the checked
+`race` primitive. Execution needs explicit `GaugeVM(race_config=RaceConfig(...))`
+fixture configuration; the bare CLI safely skips an unconfigured race.
+`GaugeRunResult.races` exposes typed `GaugeRaceOutcome` audit records; JSON adds
+`races` only when an outcome exists, preserving legacy no-race output.
+See [Gauge](docs/gauge.md) and [benchmark](docs/benchmark.md) documentation.

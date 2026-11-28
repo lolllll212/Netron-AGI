@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from early_agi.core.branch_race import RaceConfig, run_branch_race
 from early_agi.gauge.ir import Instruction
+from early_agi.gauge.results import GaugeRaceOutcome
 
 __all__ = ["_RaceOps"]
 
@@ -49,6 +50,7 @@ class _RaceOps:
             gates=gates,
         )
         detail = result.as_dict()
+        self.vm.result.races.append(cast(GaugeRaceOutcome, detail))
         self.execution.plasticity["branch_race"] = detail
         self.vm.result.plasticity = dict(self.execution.plasticity)
         self.execution.cost.discarded_tokens += int(result.total_tokens)

@@ -320,3 +320,8 @@ hash. Branch names select offline fixture strategies, not arbitrary extern-op
 execution. Only a gate-green highest-eta candidate crystallises; losing evidence
 and its SUPERSEDED/MERGED lineage remain append-only. The packaged default
 benchmark program does not opt into racing.
+
+The complete checked example is `examples/netron_race.gauge`. Completed outcomes
+are accumulated in `GaugeRunResult.races: list[GaugeRaceOutcome]` as well as the
+legacy plasticity detail. JSON includes `races` only for runs with outcomes so
+existing no-race consumers and baseline parity are unchanged.

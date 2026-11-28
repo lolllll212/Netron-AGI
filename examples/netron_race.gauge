@@ -1,0 +1,19 @@
+// Offline fixture strategies; pass GaugeVM(race_config=...) to execute.
+scale L0 -> L2
+
+manifold fix : PatchSpace {
+}
+
+gate syntax_valid(): true
+gate tests_passing(): true
+
+extern op branch_a() deforms(none) commutes(none) after()
+extern op branch_b() deforms(none) commutes(none) after()
+
+govern eta_min = 0.15, chi_max = 4 {
+    on frustration {
+        race [branch_a, branch_b] under [syntax_valid, tests_passing] -> winner
+    }
+    evolve fix under [syntax_valid, tests_passing]
+    collapse(fix) -> sink
+}
