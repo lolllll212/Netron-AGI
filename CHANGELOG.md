@@ -160,3 +160,13 @@ The deterministic agent loop, end to end.
 - Added NIM-compatible environment aliases, strict text roles, Retry-After/jitter
   retries, shared pacing and an opt-in eight-task live evaluation command. Live
   tests use mocked HTTP only. No live model performance claims or results.
+
+### Live evaluation reliability
+
+- Added timestamped task/request/grading progress, 15-second waiting heartbeats,
+  redacted transport error details, and atomic per-task/interrupt checkpoints.
+- Added a shared transport-failure circuit, explicit retry controls (live default:
+  zero retries), live timeout default of 180 seconds, and incomplete-run exit codes.
+- Added `--smoke` (one task/pass/arm/candidate), task/pass/arm selectors, and schema
+  v2 completion/validity metadata so connection failures are not published as
+  model-performance comparisons. Checkpoints preserve results but do not resume.

@@ -99,6 +99,8 @@ class OpenAICompatiblePatchRouter:
     temperature: float = 0.0
     enabled: bool = False
     max_tokens: int = 4096
+    max_retries: int = 2
+    progress: Any = field(default=None, repr=False)
     pacer: Any = field(default=None, repr=False)
     rate_limit_retries: int = 0
     requests_sent: int = 0
@@ -128,7 +130,8 @@ class OpenAICompatiblePatchRouter:
             base_url=self.base_url,
             api_key=self.api_key,
             timeout=self.timeout_s,
-            max_retries=2,
+            max_retries=self.max_retries,
+            progress=self.progress,
             pacer=self.pacer,
             temperature=self.temperature,
         )

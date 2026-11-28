@@ -86,3 +86,49 @@ A standalone `python -m early_agi.bench.live_eval` entry point is also available
   pass token speedup/reflex hits. Retry failures may obscure provider usage;
   retained reservations expose that uncertainty. Review generated reports before
   publishing them; no fabricated live summaries are supplied here.
+
+## Reliability and a small first run
+
+Update the branch before running again. Live evaluation now defaults to a
+**180-second per-request/grader timeout** and **zero automatic request retries**.
+The offline benchmark keeps its previous 60-second timeout default. An earlier
+chat explanation said the old live CLI default was 30 seconds; the code default
+was actually 60. A slow successful diagnostic does not by itself prove that all
+previous failures were timeouts; new reports preserve the actual error text.
+
+First run just one task, one pass, one arm and one candidate request:
+
+```powershell
+python -m early_agi.bench --live-eval --allow-live --smoke --endpoint https://integrate.api.nvidia.com/v1 --api-key-env NVIDIA_API_KEY --model "moonshotai/kimi-k3.1-pro" --deep-model "moonshotai/kimi-k3.1-pro" --timeout 180 --max-tokens 2048 --token-budget 20000 --output benchmarks/live-eval/smoke.json
+```
+
+This is **one paid/live completion attempt**, not a connectivity-only test.
+`--smoke` forces task-limit=1, passes=1, baseline only and k=1; it does not make a
+three-arm comparison or claim reflex speedup. `--verify-models` adds a separate
+models-list request if desired. A first repaired task still requires real external
+grading, and 2048 output tokens may not suffice for every reasoning model.
+
+For larger controlled runs, use `--task-limit N`, `--passes 1|2`, and
+`--arms baseline netron_plastic netron_race`. Only increase the workload once the
+smoke JSON shows a successful task, not merely a successful HTTP response.
+
+- Timestamped progress goes to stderr immediately: task/request starts, request
+  heartbeats every 15 seconds, retry waits, grading and completion. A heartbeat
+  means the client is waiting, not that the provider is generating tokens.
+- Output JSON is atomically checkpointed before/after each task and at exit.
+  A checkpoint is **not an automatic resume mechanism**; starting the same command
+  again makes a new run and can overwrite that file. Use unique output filenames.
+- Two consecutive exhausted transport failures open a shared circuit and stop
+  the evaluation, without trying the remaining arms. `--transport-failure-limit`
+  configures this threshold. `--request-retries N` enables explicit retry attempts;
+  reservations account for them. Already in-flight parallel calls cannot be undone.
+- Schema v2 records `status`, `valid_comparison`, selected plan, completed/planned
+  task counts and secret-redacted error details. Unattempted tasks are omitted,
+  not silently counted as model failures. A budget-exhausted, interrupted or
+  transport-failed report is **not a valid model-performance comparison**.
+- Ctrl+C preserves completed tasks and marks the current task interrupted. It
+  does not guarantee immediate cancellation of in-flight HTTP calls or final
+  billing visibility. The CLI returns 130 on interruption and 1 on other failed
+  or incomplete runs. A completed smoke run returns 0 but valid_comparison=false.
+- Progress/JSON omit credentials and prompt bodies. Still review artifacts before
+  publishing; unresolved token reservations are not confirmed billed usage.

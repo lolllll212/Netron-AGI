@@ -123,6 +123,7 @@ class OpenAICompatibleClient:
         max_retries: int = 2,
         temperature: float = 0.0,
         pacer: RequestPacer | None = None,
+        progress: Any = None,
     ) -> None:
         self.model = model
         self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
@@ -131,6 +132,7 @@ class OpenAICompatibleClient:
         self.max_retries = max(0, int(max_retries))
         self.temperature = float(temperature)
         self.pacer = pacer
+        self.progress = progress
         self.rate_limit_retries = 0
         self.requests_sent = 0
 
@@ -205,7 +207,10 @@ class OpenAICompatibleClient:
             except json.JSONDecodeError as exc:
                 last_error = LLMError(f"non-JSON response from {self.endpoint}: {exc}")
             if attempt < self.max_retries:
-                time.sleep(max(delay, min(30.0, 0.5 * (2**attempt)) + random.uniform(0.0, 0.25)))
+                wait = max(delay, min(30.0, 0.5 * (2**attempt)) + random.uniform(0.0, 0.25))
+                if self.progress:
+                    self.progress("retry", attempt=attempt + 1, wait_s=round(wait, 2), error=str(last_error))
+                time.sleep(wait)
         else:
             assert last_error is not None
             raise last_error

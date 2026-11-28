@@ -29,13 +29,24 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--rpm-limit", type=float, default=40)
     parser.add_argument("--max-tokens", type=int, default=2048)
     parser.add_argument("--token-budget", type=int, default=200000)
+    parser.add_argument("--smoke", action="store_true", help="one task, one pass, baseline only, k=1")
+    parser.add_argument("--task-limit", type=int)
+    parser.add_argument("--passes", type=int, choices=[1, 2], default=2)
+    parser.add_argument(
+        "--arms",
+        nargs="+",
+        choices=["baseline", "netron_plastic", "netron_race"],
+        default=["baseline", "netron_plastic", "netron_race"],
+    )
+    parser.add_argument("--request-retries", type=int, default=0)
+    parser.add_argument("--transport-failure-limit", type=int, default=2)
     parser.add_argument("--tasks", type=int, default=10, help="sequential tasks (default: 10)")
     parser.add_argument("--k", type=int, default=4, help="maximum patch attempts per task (default: 4)")
     parser.add_argument(
         "--timeout",
         type=float,
-        default=60.0,
-        help="local pytest and optional live-router timeout in seconds (default: 60)",
+        default=None,
+        help="request/grader timeout in seconds (live-eval: 180; offline: 60)",
     )
     parser.add_argument(
         "--router",
@@ -110,10 +121,13 @@ def _write(text: str, output: str | None) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.timeout is None:
+        args.timeout = 180.0 if args.live_eval else 60.0
     if args.live_eval:
         if not args.allow_live or not args.deep_model or not args.output:
             parser.error("--live-eval requires --allow-live, --deep-model and --output")
         from .live_eval import run_live_evaluation
+        from .live_monitor import stderr_progress
 
         key = os.getenv(args.api_key_env, "") or os.getenv("NVIDIA_API_KEY", "")
         if not key:
@@ -123,16 +137,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             api_key=key,
             model=args.model,
             deep_model=args.deep_model,
-            k=args.k,
+            k=1 if args.smoke else args.k,
             max_tokens=args.max_tokens,
             token_budget=args.token_budget,
             rpm_limit=args.rpm_limit,
             max_workers=args.max_workers,
             verify_models=args.verify_models,
             timeout=args.timeout,
+            task_limit=1 if args.smoke else args.task_limit,
+            passes=1 if args.smoke else args.passes,
+            arms=["baseline"] if args.smoke else args.arms,
+            request_retries=args.request_retries,
+            transport_failure_limit=args.transport_failure_limit,
+            progress=stderr_progress,
+            checkpoint_path=args.output,
         )
         _write(_dump(report, compact=args.compact), args.output)
-        return 0
+        return 0 if report["status"] == "completed" else 130 if report["status"] == "interrupted" else 1
     if args.verify_models:
         parser.error("--verify-models requires --live-eval")
     if args.router == "openai" and not args.allow_live:

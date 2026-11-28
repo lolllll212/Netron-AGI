@@ -115,7 +115,10 @@ def test_cli_live_dispatch_requires_opt_in_and_writes_ledger(tmp_path, monkeypat
     with pytest.raises(SystemExit):
         main(["--live-eval", "--deep-model", "deep", "--output", str(target)])
     monkeypatch.setenv("NVIDIA_API_KEY", "mock-key")
-    with patch("early_agi.bench.live_eval.run_live_evaluation", return_value={"offline": False}) as run:
+    with patch(
+        "early_agi.bench.live_eval.run_live_evaluation",
+        return_value={"offline": False, "status": "completed"},
+    ) as run:
         assert (
             main(
                 [
@@ -133,6 +136,6 @@ def test_cli_live_dispatch_requires_opt_in_and_writes_ledger(tmp_path, monkeypat
             )
             == 0
         )
-    assert json.loads(target.read_text()) == {"offline": False}
+    assert json.loads(target.read_text()) == {"offline": False, "status": "completed"}
     assert run.call_args.kwargs["max_workers"] == 2
     assert run.call_args.kwargs["rpm_limit"] == 40
