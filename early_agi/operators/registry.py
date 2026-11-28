@@ -1,17 +1,4 @@
-"""Non-commuting operators and the commutator side-effect matrix.
-
-Tools are not interchangeable functions here. Each one declares the resources it
-reads and writes, which makes ``[T_i, T_j] != 0`` concrete: running the tests
-before mutating a coupled file produces a different state than mutating first,
-so the verification you just paid for is stale.
-
-Two guards come out of that:
-
-* ``isolate_writes`` — the kernel trips this on a coordinate shift, so the fast
-  executor physically cannot patch its way out of a SHIFT_COORDINATE interrupt.
-* ``audit_turn`` — flags any mutating call that consumed a verification of the
-  same resource within the same turn.
-"""
+"""Non-commuting operators and the commutator side-effect matrix."""
 
 from __future__ import annotations
 
@@ -19,6 +6,7 @@ import ast
 import difflib
 import io
 import keyword
+import os
 import shlex
 import subprocess
 import time
@@ -29,7 +17,9 @@ from pathlib import Path
 from typing import Any
 
 __all__ = [
+    "EPISTEMIC_PROBE",
     "READ",
+    "READ_ONLY_KINDS",
     "VERIFY",
     "WILDCARD",
     "WRITE",
@@ -45,6 +35,8 @@ WILDCARD = "*"
 READ = "read"
 WRITE = "write"
 VERIFY = "verify"
+READ_ONLY_KINDS = frozenset({READ, VERIFY})
+EPISTEMIC_PROBE = "EPISTEMIC_PROBE"
 
 
 class WriteLocked(RuntimeError):
@@ -72,7 +64,6 @@ def _overlap(left: Iterable[str], right: Iterable[str]) -> bool:
 
 
 def _render(template: Iterable[str], args: Mapping[str, Any]) -> frozenset[str]:
-    """Substitute call arguments into scope templates; unknown -> wildcard."""
     rendered: set[str] = set()
     for item in template:
         try:
@@ -80,6 +71,30 @@ def _render(template: Iterable[str], args: Mapping[str, Any]) -> frozenset[str]:
         except (KeyError, IndexError, ValueError):
             rendered.add(WILDCARD)
     return frozenset(rendered)
+
+
+def _matching_name(target: str, mapping: Mapping[str, str]) -> str | None:
+    for key, value in mapping.items():
+        if _scope_matches(target, key):
+            return value
+    return None
+
+
+def _verifier_ok(result: Any) -> bool | None:
+    """Map verifier results to pass / fail / unverifiable."""
+    if not isinstance(result, Mapping):
+        return True
+    if "passed" in result:
+        verdict = result.get("passed")
+        return None if verdict is None else bool(verdict)
+    status = result.get("status")
+    if status == "unsat":
+        return True
+    if status == "sat":
+        return False
+    if status in {"unknown", "error"}:
+        return None
+    return True
 
 
 @dataclass(frozen=True)
@@ -94,7 +109,7 @@ class OperatorSpec:
 
     @property
     def mutates(self) -> bool:
-        return self.kind == WRITE or bool(self.writes)
+        return str(self.kind).casefold() == WRITE or bool(self.writes)
 
 
 @dataclass(frozen=True)
@@ -104,20 +119,17 @@ class OperatorEvent:
     name: str
     kind: str
     targets: frozenset[str]
-    ok: bool
+    ok: bool | None
     blocked: bool
+    mutates: bool
     elapsed_ms: float = 0.0
     detail: str = ""
-
-    @property
-    def mutates(self) -> bool:
-        return self.kind == WRITE
 
 
 @dataclass(frozen=True)
 class CommutatorViolation:
     turn: int
-    kind: str  # "stale_verification" | "write_race" | "blocked_write"
+    kind: str
     first: str
     second: str
     targets: tuple[str, ...]
@@ -139,8 +151,19 @@ class OperatorRegistry:
         self._seq = 0
         self.turn = 0
         self._lock_reason: str = ""
+        self._directive: str = ""
 
-    # -- registration -------------------------------------------------------
+    @property
+    def active_directive(self) -> str:
+        """Current kernel directive, if any, constraining operator selection."""
+        return self._directive
+
+    def set_directive(self, directive: str) -> None:
+        self._directive = str(directive)
+
+    def clear_directive(self) -> None:
+        self._directive = ""
+
     def register(self, spec: OperatorSpec) -> OperatorSpec:
         if not spec.name:
             raise ValueError("operator needs a name")
@@ -152,6 +175,13 @@ class OperatorRegistry:
     def register_many(self, specs: Iterable[OperatorSpec]) -> None:
         for spec in specs:
             self.register(spec)
+
+    def replace(self, spec: OperatorSpec) -> OperatorSpec:
+        """Install or replace a spec; used by compiled Gauge programs."""
+        if not spec.name:
+            raise ValueError("operator needs a name")
+        self._ops[spec.name] = spec
+        return spec
 
     def operator(self, name: str) -> OperatorSpec:
         try:
@@ -168,7 +198,6 @@ class OperatorRegistry:
     def __len__(self) -> int:
         return len(self._ops)
 
-    # -- write isolation (Trap 2) ------------------------------------------
     @property
     def writes_locked(self) -> bool:
         return bool(self._lock_reason)
@@ -187,7 +216,61 @@ class OperatorRegistry:
         self.turn += 1
         return self.turn
 
-    # -- invocation ---------------------------------------------------------
+    def epistemic_probe(
+        self,
+        calls: Sequence[tuple[str, Mapping[str, Any]]] | None = None,
+    ) -> dict[str, Any]:
+        """Run cheap read-only operators while temporarily isolating writes."""
+        if calls is None:
+            calls = (
+                ("inspect_deps", {}),
+                ("run_pytest", {"paths": (), "timeout": 30.0}),
+                ("check_z3", {"smt2": "(check-sat)", "timeout_ms": 1000}),
+            )
+        previous = self._lock_reason
+        previous_directive = self._directive
+        self.isolate_writes(reason="EPISTEMIC_PROBE (read-only measurements only)")
+        self.set_directive(EPISTEMIC_PROBE)
+        results: list[dict[str, Any]] = []
+        try:
+            for name, kwargs in calls:
+                spec = self.operator(name)
+                if spec.mutates or str(spec.kind).casefold() not in READ_ONLY_KINDS:
+                    results.append({"operator": name, "skipped": "mutating operator"})
+                    continue
+                try:
+                    value = self.apply(name, **dict(kwargs))
+                    results.append(
+                        {
+                            "operator": name,
+                            "ok": True,
+                            "value": value if isinstance(value, Mapping) else str(value)[:500],
+                        }
+                    )
+                except Exception as exc:  # probing must never abort the turn
+                    results.append({"operator": name, "ok": False, "error": f"{type(exc).__name__}: {exc}"})
+        finally:
+            self._lock_reason = previous
+            self._directive = previous_directive
+        return {"operators": [name for name, _ in calls], "results": results}
+
+    def snapshot(self) -> dict[str, Any]:
+        """Capture mutable bookkeeping for a transactional session turn."""
+        return {
+            "turn": self.turn,
+            "seq": self._seq,
+            "log": list(self._log),
+            "lock_reason": self._lock_reason,
+            "directive": self._directive,
+        }
+
+    def restore_checkpoint(self, checkpoint: Mapping[str, Any]) -> None:
+        self.turn = int(checkpoint.get("turn", 0))
+        self._seq = int(checkpoint.get("seq", 0))
+        self._log = list(checkpoint.get("log", ()))
+        self._lock_reason = str(checkpoint.get("lock_reason", ""))
+        self._directive = str(checkpoint.get("directive", ""))
+
     def apply(self, name: str, /, **kwargs: Any) -> Any:
         spec = self.operator(name)
         targets = _render(spec.writes or spec.reads, kwargs) if (spec.writes or spec.reads) else frozenset()
@@ -195,6 +278,10 @@ class OperatorRegistry:
         if spec.mutates and self.writes_locked:
             self._record(spec, targets, ok=False, blocked=True, detail=self._lock_reason)
             raise WriteLocked(f"operator {name!r} is mutating but writes are isolated: {self._lock_reason}")
+        if self._directive == EPISTEMIC_PROBE and str(spec.kind).casefold() not in READ_ONLY_KINDS:
+            detail = f"{EPISTEMIC_PROBE} allows only READ/VERIFY operators"
+            self._record(spec, targets, ok=False, blocked=True, detail=detail)
+            raise WriteLocked(f"operator {name!r} is blocked: {detail}")
 
         started = time.perf_counter()
         try:
@@ -209,13 +296,9 @@ class OperatorRegistry:
                 detail=f"{type(exc).__name__}: {exc}",
             )
             raise
-        # A verifier that ran but reported failure is not a successful
-        # verification; the reordering audit depends on that distinction.
-        ok = True
-        if spec.kind == VERIFY and isinstance(result, Mapping):
-            verdict = result.get("passed")
-            if verdict is not None:
-                ok = bool(verdict)
+        ok: bool | None = True
+        if str(spec.kind).casefold() == VERIFY:
+            ok = _verifier_ok(result)
         self._record(
             spec,
             targets,
@@ -230,7 +313,7 @@ class OperatorRegistry:
         spec: OperatorSpec,
         targets: frozenset[str],
         *,
-        ok: bool,
+        ok: bool | None,
         blocked: bool,
         elapsed_ms: float = 0.0,
         detail: str = "",
@@ -245,6 +328,7 @@ class OperatorRegistry:
                 targets=targets,
                 ok=ok,
                 blocked=blocked,
+                mutates=spec.mutates,
                 elapsed_ms=elapsed_ms,
                 detail=detail,
             )
@@ -256,9 +340,7 @@ class OperatorRegistry:
     def log(self) -> tuple[OperatorEvent, ...]:
         return tuple(self._log)
 
-    # -- commutators --------------------------------------------------------
     def commutator(self, first: str, second: str, /, **kwargs: Any) -> float:
-        """0.0 when the operators commute, 2.0 for write/write, 1.0 for write/read."""
         a, b = self.operator(first), self.operator(second)
         a_writes = _render(a.writes, kwargs)
         b_writes = _render(b.writes, kwargs)
@@ -278,7 +360,6 @@ class OperatorRegistry:
     def matrix(
         self, names: Sequence[str] | None = None, *, path: str = "<path>"
     ) -> dict[str, dict[str, float]]:
-        """Symmetric commutator side-effect matrix for the given operators."""
         chosen = tuple(names) if names else self.names()
         args = {"path": path, "command": path, "target": path}
         return {a: {b: self.commutator(a, b, **args) for b in chosen} for a in chosen}
@@ -293,13 +374,11 @@ class OperatorRegistry:
             rows.append(row_name.ljust(width) + "".join(f"{row[col]:.1f}".rjust(width) for col in columns))
         return "\n".join(rows)
 
-    # -- reordering audit ---------------------------------------------------
     def audit_turn(self, turn: int | None = None) -> list[CommutatorViolation]:
-        """Flag verifications invalidated by a later mutation in the same turn."""
         target_turn = self.turn if turn is None else turn
         events = [event for event in self._log if event.turn == target_turn]
         violations: list[CommutatorViolation] = []
-        verified: dict[str, str] = {}  # target -> verifier name
+        verified: dict[str, str] = {}
         written: dict[str, str] = {}
 
         for event in events:
@@ -310,27 +389,33 @@ class OperatorRegistry:
                     )
                 )
                 continue
-            if event.kind == VERIFY and event.ok:
+            if event.kind == VERIFY and event.ok is True:
                 for target in event.targets:
                     verified[target] = event.name
                 continue
             if event.mutates:
                 stale = sorted(t for t in event.targets if any(_scope_matches(t, v) for v in verified))
                 if stale:
+                    first = _matching_name(stale[0], verified) or "verify"
                     violations.append(
                         CommutatorViolation(
                             target_turn,
                             "stale_verification",
-                            verified.get(stale[0], "verify"),
+                            first,
                             event.name,
                             tuple(stale),
                         )
                     )
                 raced = sorted(t for t in event.targets if any(_scope_matches(t, w) for w in written))
                 if raced:
+                    first = _matching_name(raced[0], written) or event.name
                     violations.append(
                         CommutatorViolation(
-                            target_turn, "write_race", written[raced[0]], event.name, tuple(raced)
+                            target_turn,
+                            "write_race",
+                            first,
+                            event.name,
+                            tuple(raced),
                         )
                     )
                 for target in event.targets:
@@ -342,9 +427,6 @@ class OperatorRegistry:
         self._seq = 0
 
 
-# ---------------------------------------------------------------------------
-# Built-in stateful operators (read / edit / shell / ast_refactor / verifiers)
-# ---------------------------------------------------------------------------
 def _safe_join(base: Path, relative: str) -> Path:
     target = (base / relative).resolve()
     base_resolved = base.resolve()
@@ -354,11 +436,6 @@ def _safe_join(base: Path, relative: str) -> Path:
 
 
 def _rename_identifiers(source: str, mapping: Mapping[str, str]) -> tuple[str, int]:
-    """Rename identifiers in place using token positions (formatting preserved).
-
-    Token spans are used rather than AST spans because a ``FunctionDef`` node
-    starts at the ``def`` keyword; splicing on that span would delete it.
-    """
     lines = source.splitlines(keepends=True)
     offsets = [0]
     for line in lines:
@@ -380,32 +457,77 @@ def _rename_identifiers(source: str, mapping: Mapping[str, str]) -> tuple[str, i
     out = source
     for start, stop, replacement in sorted(edits, key=lambda e: e[0], reverse=True):
         out = out[:start] + replacement + out[stop:]
-    ast.parse(out)  # never hand back source that no longer parses
+    ast.parse(out)
     return out, len(edits)
 
 
-def build_default_registry(root: str | Path) -> OperatorRegistry:
-    """Wire the six Phase-2 tools with explicit side-effect footprints."""
+def build_default_registry(root: str | Path, *, allow_shell: bool = False) -> OperatorRegistry:
+    """Wire the Phase-2 tools with explicit side-effect footprints.
+
+    ``run_shell`` is unconstrained by construction. It is registered with a
+    wildcard footprint for commutator auditing, but disabled by default so a
+    coordinate shift cannot accidentally turn a text edit into process escape.
+    """
     base = Path(root)
 
     def read_file(path: str) -> str:
-        return _safe_join(base, path).read_text(encoding="utf-8")
+        return _safe_join(base, path).read_text(encoding="utf-8", errors="replace")
 
-    def write_file(path: str, content: str, *, expected: str | None = None) -> dict[str, Any]:
+    def inspect_deps() -> dict[str, Any]:
+        """Read-only AST motif census used by epistemic probing."""
+        ignored = {".git", "__pycache__", ".venv", "venv", "node_modules", "build", "dist"}
+        files: list[str] = []
+        imports: set[str] = set()
+        functions = 0
+        calls = 0
+        for target in sorted(base.rglob("*.py")):
+            relative = target.relative_to(base).as_posix()
+            if any(part in ignored for part in target.relative_to(base).parts):
+                continue
+            files.append(relative)
+            try:
+                tree = ast.parse(target.read_text(encoding="utf-8", errors="replace"))
+            except (OSError, SyntaxError):
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imports.update(alias.name for alias in node.names)
+                elif isinstance(node, ast.ImportFrom):
+                    imports.add(node.module or "")
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    functions += 1
+                elif isinstance(node, ast.Call):
+                    calls += 1
+        return {
+            "modules": len(files),
+            "imports": sorted(item for item in imports if item),
+            "functions": functions,
+            "calls": calls,
+            "files": files[:32],
+        }
+
+    def _expected_bytes(expected: str | bytes | None) -> bytes | None:
+        if expected is None:
+            return None
+        return expected.encode("utf-8") if isinstance(expected, str) else bytes(expected)
+
+    def write_file(path: str, content: str | bytes, *, expected: str | bytes | None = None) -> dict[str, Any]:
         target = _safe_join(base, path)
-        previous = target.read_text(encoding="utf-8") if target.exists() else ""
-        if expected is not None and previous != expected:
+        previous = target.read_bytes() if target.exists() else b""
+        expect = _expected_bytes(expected)
+        if expect is not None and previous != expect:
             raise RuntimeError(f"refusing to overwrite {path!r}: content changed since it was read")
+        encoded = content.encode("utf-8") if isinstance(content, str) else bytes(content)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        target.write_bytes(encoded)
         return {
             "path": path,
             "created": not previous,
-            "bytes": len(content.encode("utf-8")),
+            "bytes": len(encoded),
             "diff": "".join(
                 difflib.unified_diff(
-                    previous.splitlines(keepends=True),
-                    content.splitlines(keepends=True),
+                    previous.decode("utf-8", errors="replace").splitlines(keepends=True),
+                    encoded.decode("utf-8", errors="replace").splitlines(keepends=True),
                     fromfile=f"a/{path}",
                     tofile=f"b/{path}",
                 )
@@ -417,14 +539,15 @@ def build_default_registry(root: str | Path) -> OperatorRegistry:
         source = target.read_text(encoding="utf-8")
         updated, count = _rename_identifiers(source, mapping)
         if count:
-            # Parse before writing: a refactor that breaks syntax must not land.
             ast.parse(updated)
             target.write_text(updated, encoding="utf-8")
         return {"path": path, "renames": count}
 
     def run_shell(command: str, *, timeout: float = 60.0) -> dict[str, Any]:
+        if not allow_shell:
+            raise PermissionError("run_shell is disabled; enable it explicitly in a sandbox")
         completed = subprocess.run(
-            shlex.split(command),
+            shlex.split(command, posix=(os.name != "nt")),
             cwd=str(base),
             capture_output=True,
             text=True,
@@ -456,6 +579,14 @@ def build_default_registry(root: str | Path) -> OperatorRegistry:
                 reads=frozenset({"{path}"}),
                 cost=0.1,
                 description="read a repository file",
+            ),
+            OperatorSpec(
+                name="inspect_deps",
+                fn=inspect_deps,
+                kind=READ,
+                reads=frozenset({"*"}),
+                cost=0.2,
+                description="read-only AST import/function/call census for epistemic probing",
             ),
             OperatorSpec(
                 name="write_file",

@@ -5,13 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "early-agi"
 dynamic = ["version"]
-description = "Binary-orchestrated, physics-backend hybrid cognitive kernel (Phases 1-3)"
+description = "Binary-orchestrated cognitive kernel with the Gauge thermodynamic orchestration language"
 readme = "README.md"
 requires-python = ">=3.10"
 keywords = [
     "ai-agents",
     "cognitive-architecture",
     "mera",
+    "gauge-language",
+    "domain-specific-language",
     "tensor-networks",
     "verification",
     "sqlite",
@@ -33,11 +35,16 @@ classifiers = [
 dependencies = ["numpy>=1.24"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "ruff>=0.4"]
+dev = ["pytest>=7", "ruff==0.17.6"]
 verify = ["z3-solver>=4.12"]
+# Optional adapter only. The bundled `thrml` backend seams use pure Python/NumPy.
+thrml = ["thrml>=0.1.4"]
 
 [project.scripts]
 early-agi = "early_agi.demo:main"
+early-agi-bench = "early_agi.bench.cli:main"
+gauge = "early_agi.gauge.cli:main"
+early-agi-gauge = "early_agi.gauge.cli:main"
 
 [project.urls]
 Repository = "https://github.com/lolll212/Netron-AGI"
@@ -51,6 +58,7 @@ include = ["early_agi*"]
 
 [tool.setuptools.package-data]
 early_agi = ["py.typed"]
+"early_agi.bench" = ["*.gauge"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

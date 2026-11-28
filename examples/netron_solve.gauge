@@ -1,0 +1,43 @@
+// Renormalisation hierarchy: L0 = raw AST/diff/test traces, L2 = scale-invariant rules.
+scale L0 -> L2
+
+// Uncollapsed candidate ensemble. It cannot be read directly without collapse -> sink.
+manifold patch_ensemble : PatchSpace {
+    scope in repo.ast.modules
+    max_tokens <= 4000
+    entanglement_bound <= 0.15
+}
+
+// Dark-state predicates.
+gate syntax_valid(p) : ast_check(p.files) == true
+gate tests_passing(p) : pytest_run(p.targets) == true and not p.has_regressions
+
+// Non-commuting environment operators with explicit interaction metadata.
+extern op capture_baseline(m) deforms(repo_state) commutes(none)
+extern op apply_candidate(m, p) deforms(repo_state) after(capture_baseline)
+
+// Reversible coordinate shift; uncall replays its inverse.
+reversible transform module_cut(p : PatchSpace) -> CutGraph {
+    reencode(p, basis = dependency_cut)
+}
+
+// Thermodynamic governor. The compiler/VM, not the LLM, is the outer loop.
+govern eta_min = 0.25, chi_max = 4 {
+    evolve patch_ensemble under [syntax_valid, tests_passing]
+
+    on volume_law(ent) {
+        patch_ensemble = module_cut(patch_ensemble)
+    }
+
+    on drag(eta) {
+        synthesize op disentangle_cut reducing eta
+    }
+
+    on frustration {
+        uncall module_cut
+        recall sink where scale == L0
+    }
+
+    // Explicit irreversible projection; pruned tails go to the lossless ColdSink.
+    resolved_patch = collapse(patch_ensemble) -> sink
+}

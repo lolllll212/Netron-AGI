@@ -1,0 +1,117 @@
+{
+  "after_refactor": "benchmarks/structural-cleanup/after-refactor-report.json",
+  "baseline": "benchmarks/structural-cleanup/baseline-report.json",
+  "command": "python -m early_agi.bench --tasks 10 --k 4 --timeout 60 --compact --output <report.json>",
+  "eta_cog": {
+    "discovery_netron": 0.337667,
+    "discovery_plain_retry": 0.906125,
+    "netron_arms": [
+      0.34,
+      0.331,
+      0.342,
+      0.364,
+      0.364,
+      0.364,
+      0.364,
+      0.364,
+      0.364,
+      0.364
+    ],
+    "plain_retry_arms": [
+      0.91506,
+      0.881925,
+      0.92139,
+      0.91506,
+      0.881925,
+      0.92139,
+      0.91506,
+      0.881925,
+      0.92139,
+      0.91506
+    ],
+    "repeat_netron": [
+      0.364,
+      0.364,
+      0.364,
+      0.364,
+      0.364,
+      0.364,
+      0.364
+    ],
+    "repeat_plain_retry": [
+      0.91506,
+      0.881925,
+      0.92139,
+      0.91506,
+      0.881925,
+      0.92139,
+      0.91506
+    ]
+  },
+  "full_report_identical": true,
+  "network_calls": 0,
+  "offline": true,
+  "repeat_task_reflex_speedups": {
+    "attempt_speedup": 2.0,
+    "reflex_hits": 7,
+    "summary_repeat_token_speedup": 7980.0,
+    "token_speedup": 7980.0
+  },
+  "rollback_counts": {
+    "netron_arms": 0,
+    "netron_rollbacks_avoided": 10,
+    "plain_retry_arms": 10,
+    "repeat_netron": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "repeat_plain_retry": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "rollbacks_avoided": 7
+  },
+  "success_at_k": {
+    "attempt_grid": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "netron_cumulative_success": [
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "plain_retry_cumulative_success": [
+      0.0,
+      1.0,
+      1.0,
+      1.0
+    ]
+  },
+  "summary": {
+    "baseline_solved": 10,
+    "netron_rollbacks_avoided": 10,
+    "netron_solved": 10,
+    "netron_tokens_saved": 9548,
+    "offline": true,
+    "ok": true,
+    "reflex_hits": 7,
+    "repeat_token_speedup": 7980.0,
+    "sequential_tasks": 10,
+    "zero_regression": true
+  },
+  "zero_regression": true
+}

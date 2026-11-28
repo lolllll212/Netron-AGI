@@ -1,22 +1,9 @@
-"""Bipartite incidence matrix construction: entities x constraints.
-
-This is the honest answer to "where does ``coupling_matrix`` come from?".
-No random embeddings: rows are real active entities (files, functions, classes),
-columns are real active constraints (gates, hypotheses), and
-
-    M[i, j] = 1[entity i is in constraint j's scope]
-            + dependencies from entity i into j's scope
-            + dependencies from j's scope into entity i
-
-Dependencies come from the import graph and the resolved call graph. SVD of
-``M`` therefore measures something exact and reproducible: whether the active
-problem is cleanly modular (low S_SVD, cheap truncation) or globally entangled
-(high S_SVD, truncation error overflows ``chi_max``).
-"""
+"""Bipartite incidence matrix construction from qualified imports and calls."""
 
 from __future__ import annotations
 
 import ast
+import posixpath
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -27,7 +14,7 @@ import numpy as np
 
 from .entropy_sensor import EntanglementReport, entanglement_report, matrix_fingerprint
 
-__all__ = ["Constraint", "CouplingMatrix", "ModuleInfo", "RepoGraph", "RepoScanner"]
+__all__ = ["CallRef", "Constraint", "CouplingMatrix", "ModuleInfo", "RepoGraph", "RepoScanner"]
 
 IGNORED_DIRS = {
     ".git",
@@ -49,10 +36,8 @@ IGNORED_DIRS = {
 
 @dataclass(frozen=True)
 class Constraint:
-    """A column of the incidence matrix."""
-
     id: str
-    kind: str = "constraint"  # "constraint" | "hypothesis"
+    kind: str = "constraint"
     paths: tuple[str, ...] = ()
     entities: tuple[str, ...] = ()
     description: str = ""
@@ -60,22 +45,29 @@ class Constraint:
     def matches(self, entity: str) -> bool:
         if entity in self.entities:
             return True
-        module = entity.split("::", 1)[0]
+        module = entity.split("::", 1)[0].replace("\\", "/")
         for prefix in self.paths:
-            clean = prefix.replace("\\", "/").strip().lstrip("./").rstrip("/")
-            if not clean or clean == ".":
-                return True  # whole repository
+            clean = posixpath.normpath(prefix.replace("\\", "/").strip()).lstrip("/")
+            if clean in ("", "."):
+                return True
             if module == clean or module.startswith(clean + "/"):
                 return True
         return False
+
+
+@dataclass(frozen=True)
+class CallRef:
+    name: str
+    qualifier: str | None = None
 
 
 @dataclass
 class ModuleInfo:
     path: str
     imports: tuple[str, ...] = ()
+    aliases: dict[str, str] = field(default_factory=dict)
     functions: tuple[str, ...] = ()
-    calls: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    calls: dict[str, tuple[CallRef, ...]] = field(default_factory=dict)
     names: tuple[str, ...] = ()
     syntax_error: str | None = None
 
@@ -88,7 +80,6 @@ class RepoGraph:
     entities: tuple[str, ...]
     truncated: bool = False
 
-    # -- queries ------------------------------------------------------------
     def dependents(self, entity: str) -> Counter[str]:
         return self.edges.get(entity, Counter())
 
@@ -133,7 +124,6 @@ class CouplingMatrix:
                 f"shape {self.matrix.shape} does not match {len(self.rows)} entities x {len(self.cols)} constraints"
             )
 
-    # -- physics ------------------------------------------------------------
     def report(self, chi_max: int = 4, tau: float = 0.15) -> EntanglementReport:
         return entanglement_report(self.matrix, chi_max=chi_max, tau=tau)
 
@@ -185,63 +175,77 @@ class CouplingMatrix:
         )
 
 
-# ---------------------------------------------------------------------------
-# Scanner
-# ---------------------------------------------------------------------------
 class RepoScanner:
-    """Parse a repository into an import/call dependency graph."""
+    """Parse a repository into a qualified import/call dependency graph."""
 
     def __init__(self, root: str | Path, *, max_files: int = 200, max_entities: int = 500) -> None:
         self.root = Path(root).resolve()
         self.max_files = max(1, max_files)
         self.max_entities = max(1, max_entities)
 
-    def files(self) -> list[Path]:
+    def _scan_files(self) -> tuple[list[Path], bool]:
         found: list[Path] = []
+        truncated = False
         for path in sorted(self.root.rglob("*.py")):
             relative = path.relative_to(self.root)
             if set(relative.parts) & IGNORED_DIRS:
                 continue
-            if path.is_file():
-                found.append(path)
+            if not path.is_file():
+                continue
             if len(found) >= self.max_files:
+                truncated = True
                 break
-        return found
+            found.append(path)
+        return found, truncated
+
+    def files(self) -> list[Path]:
+        return self._scan_files()[0]
 
     def scan(self) -> RepoGraph:
-        paths = self.files()
-        truncated = len(paths) >= self.max_files
+        paths, truncated = self._scan_files()
         modules: dict[str, ModuleInfo] = {}
         dotted: dict[str, str] = {}
 
         for path in paths:
             module_id = path.relative_to(self.root).as_posix()
             dotted[self._dotted(module_id)] = module_id
-
         for path in paths:
             module_id = path.relative_to(self.root).as_posix()
             modules[module_id] = self._parse(path, module_id, dotted)
 
         edges: dict[str, Counter[str]] = defaultdict(Counter)
-
-        # module import edges
         for module_id, info in modules.items():
             for imported in info.imports:
                 if imported != module_id:
                     edges[module_id][imported] += 1
 
-        # function call edges (resolved by simple name across modules)
-        simple_index: dict[str, list[str]] = defaultdict(list)
-        for info in modules.values():
-            for function in info.functions:
-                simple_index[function.split("::", 1)[1].split(".")[-1]].append(function)
+        functions_by_module: dict[str, list[tuple[str, str]]] = defaultdict(list)
+        for module_id, info in modules.items():
+            for entity in info.functions:
+                qualified = entity.split("::", 1)[1]
+                simple = qualified.split(".")[-1]
+                functions_by_module[module_id].append((simple, entity))
 
-        for info in modules.values():
-            for caller, callees in info.calls.items():
-                for simple in callees:
-                    for target in simple_index.get(simple, ()):
-                        if target != caller:
-                            edges[caller][target] += 1
+        for module_id, info in modules.items():
+            for caller, refs in info.calls.items():
+                for ref in refs:
+                    targets: list[str] = []
+                    for simple, entity in functions_by_module.get(module_id, ()):
+                        if simple == ref.name and entity != caller:
+                            targets.append(entity)
+                    if not targets and ref.qualifier is None:
+                        for imported in info.imports:
+                            for simple, entity in functions_by_module.get(imported, ()):
+                                if simple == ref.name and entity != caller:
+                                    targets.append(entity)
+                    elif ref.qualifier is not None:
+                        resolved = info.aliases.get(ref.qualifier)
+                        if resolved:
+                            for simple, entity in functions_by_module.get(resolved, ()):
+                                if simple == ref.name and entity != caller:
+                                    targets.append(entity)
+                    for target in dict.fromkeys(targets):
+                        edges[caller][target] += 1
 
         entities = self._select_entities(modules, edges)
         return RepoGraph(
@@ -252,7 +256,6 @@ class RepoScanner:
             truncated=truncated,
         )
 
-    # -- internals ----------------------------------------------------------
     @staticmethod
     def _dotted(module_id: str) -> str:
         stem = module_id[:-3] if module_id.endswith(".py") else module_id
@@ -268,12 +271,14 @@ class RepoScanner:
             return ModuleInfo(path=module_id, syntax_error=f"{type(exc).__name__}: {exc}")
 
         imports: set[str] = set()
+        aliases: dict[str, str] = {}
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     resolved = self._resolve(alias.name, dotted)
                     if resolved:
                         imports.add(resolved)
+                        aliases[alias.asname or alias.name.split(".")[-1]] = resolved
             elif isinstance(node, ast.ImportFrom):
                 base = node.module or ""
                 if node.level:
@@ -286,9 +291,10 @@ class RepoScanner:
                     resolved = self._resolve(candidate, dotted) or self._resolve(base, dotted)
                     if resolved:
                         imports.add(resolved)
+                        aliases[alias.asname or alias.name] = resolved
 
         functions: list[str] = []
-        calls: dict[str, tuple[str, ...]] = {}
+        calls: dict[str, tuple[CallRef, ...]] = {}
         top_names: list[str] = []
 
         def visit(node: ast.AST, prefix: str) -> None:
@@ -298,15 +304,18 @@ class RepoScanner:
                     entity = f"{module_id}::{qualified}"
                     functions.append(entity)
                     if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        callees: list[str] = []
+                        refs: list[CallRef] = []
                         for inner in ast.walk(child):
                             if isinstance(inner, ast.Call):
                                 target = inner.func
                                 if isinstance(target, ast.Name):
-                                    callees.append(target.id)
+                                    refs.append(CallRef(target.id))
                                 elif isinstance(target, ast.Attribute):
-                                    callees.append(target.attr)
-                        calls[entity] = tuple(callees)
+                                    qualifier = (
+                                        target.value.id if isinstance(target.value, ast.Name) else None
+                                    )
+                                    refs.append(CallRef(target.attr, qualifier))
+                        calls[entity] = tuple(refs)
                     visit(child, f"{qualified}.")
                 elif isinstance(child, (ast.Assign, ast.AnnAssign)):
                     for target in getattr(child, "targets", [getattr(child, "target", None)]):
@@ -317,6 +326,7 @@ class RepoScanner:
         return ModuleInfo(
             path=module_id,
             imports=tuple(sorted(imports)),
+            aliases=aliases,
             functions=tuple(functions),
             calls=calls,
             names=tuple(sorted(set(top_names))),
@@ -342,7 +352,6 @@ class RepoScanner:
             for function in info.functions:
                 inbound = sum(1 for src in edges.values() if function in src)
                 scored.append((inbound, function))
-        # highest fan-in first, then name, so the cut is deterministic
         scored.sort(key=lambda item: (-item[0], item[1]))
         chosen = [name for _, name in scored[: self.max_entities]]
         return tuple(sorted(chosen))
@@ -352,7 +361,6 @@ def build_coupling(graph: RepoGraph, constraints: Sequence[Constraint]) -> Coupl
     rows = graph.entities
     cols = [constraint.id for constraint in constraints]
     matrix = np.zeros((len(rows), len(cols)), dtype=np.float64)
-
     scopes: list[set[str]] = []
     for constraint in constraints:
         scopes.append({entity for entity in rows if constraint.matches(entity)})
@@ -361,8 +369,6 @@ def build_coupling(graph: RepoGraph, constraints: Sequence[Constraint]) -> Coupl
         if not scope:
             continue
         for index, entity in enumerate(rows):
-            # dependencies from the scope into this entity (the coupling that
-            # drags an otherwise-unrelated entity into the constraint)
             inbound = float(
                 sum(
                     counter.get(entity, 0)
@@ -371,7 +377,6 @@ def build_coupling(graph: RepoGraph, constraints: Sequence[Constraint]) -> Coupl
                 )
             )
             if entity in scope:
-                # presence + dependencies *into* the scope (internal cohesion)
                 outbound = float(
                     sum(
                         count

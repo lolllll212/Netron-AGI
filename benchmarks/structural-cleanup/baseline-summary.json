@@ -1,0 +1,281 @@
+{
+  "arms": {
+    "netron": {
+      "eta_cog_curve": [
+        0.34,
+        0.331,
+        0.342,
+        0.364,
+        0.364,
+        0.364,
+        0.364,
+        0.364,
+        0.364,
+        0.364
+      ],
+      "eta_cog_mean": 0.3561,
+      "preflight_probes": 3,
+      "reflex_compiles": 6,
+      "reflex_hits": 7,
+      "rollbacks": 0,
+      "tokens_spent": 1899
+    },
+    "plain_retry": {
+      "eta_cog_curve": [
+        0.91506,
+        0.881925,
+        0.92139,
+        0.91506,
+        0.881925,
+        0.92139,
+        0.91506,
+        0.881925,
+        0.92139,
+        0.91506
+      ],
+      "eta_cog_mean": 0.907019,
+      "preflight_probes": 0,
+      "reflex_compiles": 0,
+      "reflex_hits": 0,
+      "rollbacks": 10,
+      "tokens_spent": 11447
+    }
+  },
+  "discovery@k": {
+    "attempt_grid": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "attempt_speedup": 2.0,
+    "eta_cog_gain": -0.568458,
+    "k": 4,
+    "netron_cumulative_success": [
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "netron_discovery_attempts": [
+      1,
+      1,
+      1
+    ],
+    "netron_eta_cog": 0.337667,
+    "netron_mean_attempt": 1.0,
+    "netron_tokens": 1899,
+    "plain_retry_cumulative_success": [
+      0.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "plain_retry_discovery_attempts": [
+      2,
+      2,
+      2
+    ],
+    "plain_retry_eta_cog": 0.906125,
+    "plain_retry_mean_attempt": 2.0,
+    "plain_retry_tokens": 3467,
+    "token_speedup": 1.825698
+  },
+  "repeat_task_reflex_speedup": {
+    "attempt_speedup": 2.0,
+    "eta_cog_gain": -0.543401,
+    "netron_attempts": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "netron_eta_cog": [
+      0.364,
+      0.364,
+      0.364,
+      0.364,
+      0.364,
+      0.364,
+      0.364
+    ],
+    "netron_reflex_hits": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "netron_rollbacks": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "netron_tokens": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "plain_retry_attempts": [
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2
+    ],
+    "plain_retry_eta_cog": [
+      0.91506,
+      0.881925,
+      0.92139,
+      0.91506,
+      0.881925,
+      0.92139,
+      0.91506
+    ],
+    "plain_retry_rollbacks": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "plain_retry_tokens": [
+      1046,
+      1450,
+      971,
+      1046,
+      1450,
+      971,
+      1046
+    ],
+    "rollbacks_avoided": 7,
+    "tasks": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "token_speedup": 7980.0
+  },
+  "summary": {
+    "baseline_solved": 10,
+    "netron_rollbacks_avoided": 10,
+    "netron_solved": 10,
+    "netron_tokens_saved": 9548,
+    "offline": true,
+    "ok": true,
+    "reflex_hits": 7,
+    "repeat_token_speedup": 7980.0,
+    "sequential_tasks": 10,
+    "zero_regression": true
+  },
+  "zero_forgetting_retention": {
+    "netron_candidate_gate_pass_rate": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "netron_checked_workspaces": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "netron_historical_gate_pass_rate": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "netron_regressions": 0,
+    "plain_retry_candidate_gate_pass_rate": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "plain_retry_checked_workspaces": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "plain_retry_historical_gate_pass_rate": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "plain_retry_regressions": 0,
+    "tasks": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "zero_regression": true
+  }
+}

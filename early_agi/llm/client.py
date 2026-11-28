@@ -1,9 +1,4 @@
-"""Minimal OpenAI-compatible chat client (stdlib HTTP, no vendor SDK).
-
-Works against Ollama (``/v1``), llama.cpp server, vLLM, LM Studio, or any hosted
-OpenAI-compatible endpoint. Swapping providers is an environment variable, not a
-code change, which is the "zero cloud lock-in" requirement.
-"""
+"""Minimal OpenAI-compatible chat client (stdlib HTTP, no vendor SDK)."""
 
 from __future__ import annotations
 
@@ -34,11 +29,20 @@ class LLMUnavailable(LLMError):
     """No endpoint configured / reachable."""
 
 
+def _coerce_int(value: Any) -> int:
+    if value is None:
+        return 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
 @dataclass(frozen=True)
 class LLMReply:
     text: str
     model: str
-    usage: Mapping[str, int] = field(default_factory=dict)
+    usage: Mapping[str, Any] = field(default_factory=dict)
     latency_ms: float = 0.0
     raw: Mapping[str, Any] = field(default_factory=dict)
 
@@ -46,12 +50,14 @@ class LLMReply:
     def tokens(self) -> int:
         total = self.usage.get("total_tokens")
         if total is not None:
-            return int(total)
-        return int(self.usage.get("prompt_tokens", 0)) + int(self.usage.get("completion_tokens", 0))
+            return _coerce_int(total)
+        return _coerce_int(self.usage.get("prompt_tokens", 0)) + _coerce_int(
+            self.usage.get("completion_tokens", 0)
+        )
 
 
 def extract_json(text: str) -> Any:
-    """Pull the first JSON object/array out of a chat completion."""
+    """Pull the outermost JSON object/array out of a chat completion."""
     stripped = text.strip()
     if not stripped:
         raise LLMError("empty completion")
@@ -70,35 +76,19 @@ def extract_json(text: str) -> Any:
         except json.JSONDecodeError:
             continue
 
-    # Last resort: scan for a balanced object/array.
-    for opener, closer in (("{", "}"), ("[", "]")):
-        start = stripped.find(opener)
-        if start < 0:
+    decoder = json.JSONDecoder()
+    found: list[tuple[int, Any]] = []
+    for start, char in enumerate(stripped):
+        if char not in "{[":
             continue
-        depth = 0
-        in_string = False
-        escaped = False
-        for index in range(start, len(stripped)):
-            char = stripped[index]
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-                elif char == '"':
-                    in_string = False
-                continue
-            if char == '"':
-                in_string = True
-            elif char == opener:
-                depth += 1
-            elif char == closer:
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(stripped[start : index + 1])
-                    except json.JSONDecodeError:
-                        break
+        try:
+            value, end = decoder.raw_decode(stripped[start:])
+        except json.JSONDecodeError:
+            continue
+        found.append((end, value))
+    if found:
+        found.sort(key=lambda item: item[0], reverse=True)
+        return found[0][1]
     raise LLMError(f"no JSON found in completion: {stripped[:200]!r}")
 
 
@@ -139,7 +129,7 @@ class OpenAICompatibleClient:
     def endpoint(self) -> str:
         return f"{self.base_url}/chat/completions"
 
-    def __repr__(self) -> str:  # pragma: no cover - cosmetics
+    def __repr__(self) -> str:  # pragma: no cover
         return f"OpenAICompatibleClient(model={self.model!r}, base_url={self.base_url!r})"
 
     def chat(

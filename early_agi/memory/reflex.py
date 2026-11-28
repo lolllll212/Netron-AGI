@@ -14,7 +14,8 @@ The trust model is the whole point, and it is deliberately narrow:
   actually learned on (content hash, never "looks similar");
 * its output still faces the same gates as a model edit, and if the gates it was
   compiled against do not pass, the files are restored immediately;
-* enough misses retire it.
+* misses and surprise fade a continuous confidence weight; there is no binary
+  active/retired switch.
 
 Memory can therefore make the loop cheaper, never less verified. Nothing here
 writes to the sink except through the append-only store, so every reflex carries
@@ -24,29 +25,56 @@ a lineage back to the traces that justified it.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
-from dataclasses import dataclass
+import re
+import time
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from ..core.adaptation.signatures import AnalogyMatch, StructuralSignature
+from ..core.adaptation.surprise import SynapticDecay
 from ..core.cold_sink import SinkRecord, canonical_json
+from ..operators.registry import OperatorSpec
 from .mera_graph import MeraGraph
 
 __all__ = [
+    "CompiledOperatorReflex",
     "CompiledReflex",
+    "OperatorReflexCompileReport",
     "ReflexCompileReport",
     "ReflexEdit",
     "ReflexLibrary",
+    "compile_operator_reflexes",
     "compile_reflexes",
     "content_sha",
+    "task_signature",
 ]
 
+_STOPWORDS = frozenset({"a", "an", "and", "for", "from", "in", "of", "or", "the", "to", "with"})
 
-def content_sha(text: str | None) -> str | None:
+
+def content_sha(text: str | bytes | None) -> str | None:
     """Content hash used to pin a reflex to the exact pre-state it learned on."""
     if text is None:
         return None
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    raw = text.encode("utf-8") if isinstance(text, str) else bytes(text)
+    return hashlib.sha256(raw).hexdigest()
+
+
+def task_signature(task: str | None) -> str | None:
+    """Stable, order-insensitive signature of a task's meaningful tokens."""
+    if not task:
+        return None
+    tokens = {
+        token
+        for token in re.findall(r"[a-z0-9_]+", task.casefold())
+        if len(token) > 1 and token not in _STOPWORDS
+    }
+    if not tokens:
+        return None
+    canonical = " ".join(sorted(tokens))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass(frozen=True)
@@ -64,8 +92,8 @@ class ReflexEdit:
         if not target.exists():
             return None in self.before_sha
         try:
-            return content_sha(target.read_text(encoding="utf-8")) in self.before_sha
-        except (OSError, UnicodeDecodeError):
+            return content_sha(target.read_bytes()) in self.before_sha
+        except OSError:
             return False
 
     def as_dict(self) -> dict[str, Any]:
@@ -95,6 +123,9 @@ class CompiledReflex:
     rule: str = ""
     hits: int = 0
     misses: int = 0
+    task_signatures: tuple[str, ...] = ()
+    confidence: float = 1.0
+    created_at: float | None = None
 
     @property
     def short(self) -> str:
@@ -114,6 +145,8 @@ class CompiledReflex:
             "support": self.support,
             "hits": self.hits,
             "misses": self.misses,
+            "task_signatures": list(self.task_signatures),
+            "confidence": self.confidence,
         }
 
 
@@ -123,6 +156,7 @@ class ReflexCompileReport:
     signatures: int = 0
     reflexes: int = 0
     skipped: tuple[str, ...] = ()
+    replay: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -130,12 +164,64 @@ class ReflexCompileReport:
             "signatures": self.signatures,
             "reflexes": self.reflexes,
             "skipped": list(self.skipped),
+            "replay": dict(self.replay),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledOperatorReflex:
+    """A deterministic reflex compiled from a repeated Gauge extern-op chain."""
+
+    hash: str
+    name: str
+    chain: tuple[str, ...]
+    signature: str
+    support: int
+    fused_operator: str
+    expected_gates: tuple[str, ...] = ()
+    task_signatures: tuple[str, ...] = ()
+    eta_mean: float | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "hash": self.hash[:10],
+            "name": self.name,
+            "chain": list(self.chain),
+            "signature": self.signature,
+            "support": self.support,
+            "fused_operator": self.fused_operator,
+            "expected_gates": list(self.expected_gates),
+            "task_signatures": list(self.task_signatures),
+            "eta_mean": self.eta_mean,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorReflexCompileReport:
+    signatures: int = 0
+    fused: int = 0
+    operators: tuple[str, ...] = ()
+    skipped: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "signatures": self.signatures,
+            "fused": self.fused,
+            "operators": list(self.operators),
+            "skipped": list(self.skipped),
         }
 
 
 def _passing(payload: Mapping[str, Any]) -> set[str]:
     gates = payload.get("gates") or {}
     return {str(name) for name, verdict in gates.items() if verdict == "pass"}
+
+
+def _payload_task(payload: Mapping[str, Any]) -> str:
+    state = payload.get("state")
+    if isinstance(state, Mapping):
+        return str(state.get("task", ""))
+    return str(payload.get("task", ""))
 
 
 def _features(payload: Mapping[str, Any]) -> set[str]:
@@ -222,6 +308,13 @@ def compile_reflexes(
             )
             continue
         pattern = sorted(set.intersection(*(_features(traces[parent].payload) for parent in parents)))
+        task_signatures = sorted(
+            {
+                task_sig
+                for parent in parents
+                if (task_sig := task_signature(_payload_task(traces[parent].payload)))
+            }
+        )
 
         # Union of the pre-states every occurrence was learned against: a reflex
         # may fire on any state it has actually seen, never on an unseen one.
@@ -249,6 +342,7 @@ def compile_reflexes(
                 "edits": edits,
                 "expected_gates": expected,
                 "pattern": pattern,
+                "task_signatures": task_signatures,
             },
             scale=scale,
             eta_cog=None,
@@ -268,15 +362,259 @@ def compile_reflexes(
     )
 
 
+def _chain_signature(chain: Sequence[str]) -> str:
+    return hashlib.sha256(canonical_json(list(chain)).encode("utf-8")).hexdigest()[:16]
+
+
+def _chain_passing(payload: Mapping[str, Any]) -> set[str]:
+    gates = payload.get("gates") or {}
+    return {str(name) for name, verdict in gates.items() if verdict == "pass"}
+
+
+def _chain_succeeded(record: SinkRecord) -> bool:
+    payload = record.payload
+    verdicts = [str(verdict) for verdict in (payload.get("gates") or {}).values()]
+    return payload.get("ok") is True and all(verdict != "fail" for verdict in verdicts)
+
+
+def _operator_fused_fn(name: str, chain: tuple[str, ...]):
+    def fused_fn(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "fused": True,
+            "reflex": name,
+            "chain": list(chain),
+            "state_keys": sorted(kwargs),
+        }
+
+    return fused_fn
+
+
+def compile_operator_reflexes(
+    graph: MeraGraph,
+    registry: Any | None = None,
+    *,
+    sink: Any | None = None,
+    min_support: int = 2,
+    limit: int = 2000,
+) -> OperatorReflexCompileReport:
+    """Fuse repeated, successful Gauge ``extern op`` chains into reflexes.
+
+    Evidence comes from ``gauge_op_chain`` sink records. A chain must succeed in
+    at least ``min_support`` distinct ticks with no failing dark-state gate; the
+    compiled node is linked to every source tick and optionally installed as a
+    deterministic ``OperatorSpec`` in the supplied registry.
+    """
+    if min_support < 1:
+        raise ValueError("min_support must be >= 1")
+    store = sink or graph.sink
+    records = store.records(kinds=("gauge_op_chain",), limit=limit)
+    groups: dict[str, list[SinkRecord]] = {}
+    skipped: list[str] = []
+
+    for record in records:
+        payload = record.payload
+        chain = tuple(str(item) for item in payload.get("chain", ()))
+        if not chain:
+            skipped.append(f"chain {record.short} has no operators")
+            continue
+        if not _chain_succeeded(record):
+            skipped.append(f"chain {record.short} was not gate-green")
+            continue
+        signature = str(payload.get("signature") or _chain_signature(chain))
+        groups.setdefault(signature, []).append(record)
+
+    fused: list[str] = []
+    for signature, members in sorted(groups.items()):
+        chain = tuple(str(item) for item in members[0].payload.get("chain", ()))
+        ticks = sorted(
+            {
+                str(
+                    record.payload.get("tick")
+                    or record.parent_hash
+                    or record.payload.get("sequence")
+                    or record.hash
+                )
+                for record in members
+            }
+        )
+        if len(ticks) < min_support:
+            skipped.append(f"{signature[:8]}: only {len(ticks)} distinct winning ticks")
+            continue
+        etas = [
+            float(record.eta_cog if record.eta_cog is not None else record.payload.get("eta", 0.0) or 0.0)
+            for record in members
+        ]
+        eta_mean = round(sum(etas) / len(etas), 6) if etas else None
+        pass_sets = [_chain_passing(record.payload) for record in members]
+        expected = sorted(set.intersection(*pass_sets)) if pass_sets else []
+        task_signatures = sorted(
+            {
+                signature_value
+                for record in members
+                if (signature_value := task_signature(str(record.payload.get("task") or "")))
+            }
+        )
+        name = f"fused_{signature[:8]}"
+        digest = graph.put_node(
+            "operator_chain_reflex",
+            {
+                "name": name,
+                "chain": list(chain),
+                "signature": signature,
+                "support": len(ticks),
+                "ticks": ticks,
+                "eta_mean": eta_mean,
+                "expected_gates": expected,
+                "task_signatures": task_signatures,
+                "fused_operator": name,
+            },
+            scale=1,
+            eta_cog=eta_mean,
+        )
+        for tick in ticks:
+            graph.link(tick, digest, "compiled_from")
+        if registry is not None:
+            registry.replace(
+                OperatorSpec(
+                    name=name,
+                    fn=_operator_fused_fn(name, chain),
+                    kind="READ",
+                    reads=frozenset({"coordinate/*"}),
+                    cost=0.0,
+                    description=f"synthesized fused Gauge reflex {signature[:8]}",
+                )
+            )
+        fused.append(name)
+
+    return OperatorReflexCompileReport(
+        signatures=len(groups),
+        fused=len(fused),
+        operators=tuple(fused),
+        skipped=tuple(skipped),
+    )
+
+
 class ReflexLibrary:
     """Read-side view over compiled reflexes, plus the fire/retire bookkeeping."""
 
-    def __init__(self, graph: MeraGraph, *, miss_limit: int = 2) -> None:
+    def __init__(
+        self,
+        graph: MeraGraph,
+        *,
+        miss_limit: int = 2,
+        confidence_threshold: float = 0.30,
+        decay: SynapticDecay | None = None,
+    ) -> None:
         self.graph = graph
         self.miss_limit = max(1, miss_limit)
+        self.confidence_threshold = float(confidence_threshold)
+        self.decay = decay or SynapticDecay()
 
-    def compile(self, *, min_support: int = 2, limit: int = 2000) -> ReflexCompileReport:
-        return compile_reflexes(self.graph, min_support=min_support, limit=limit)
+    def compile(
+        self,
+        *,
+        min_support: int = 2,
+        limit: int = 2000,
+        replay_gate: Any | None = None,
+    ) -> ReflexCompileReport:
+        replay: dict[str, Any] = {}
+        if replay_gate is not None:
+            replay = dict(replay_gate() or {})
+            if not replay.get("ok", False):
+                return ReflexCompileReport(
+                    skipped=(f"sandbox replay gate rejected reflex promotion: {replay.get('detail', '')}",),
+                    replay=replay,
+                )
+        report = compile_reflexes(self.graph, min_support=min_support, limit=limit)
+        return replace(report, replay=replay)
+
+    def compile_operator_chains(
+        self,
+        registry: Any | None = None,
+        *,
+        sink: Any | None = None,
+        min_support: int = 2,
+        limit: int = 2000,
+    ) -> OperatorReflexCompileReport:
+        """Compile repeated gate-green Gauge operator chains into fused ops."""
+        return compile_operator_reflexes(
+            self.graph,
+            registry,
+            sink=sink,
+            min_support=min_support,
+            limit=limit,
+        )
+
+    def operator_reflexes(self) -> list[CompiledOperatorReflex]:
+        """Load deterministic operator-chain reflexes from the MERA graph."""
+        compiled: list[CompiledOperatorReflex] = []
+        for node in self.graph.nodes(kind="operator_chain_reflex"):
+            payload = node["payload"]
+            raw_eta = payload.get("eta_mean")
+            edges = self.graph.sources(node["hash"], "compiled_from")
+            compiled.append(
+                CompiledOperatorReflex(
+                    hash=node["hash"],
+                    name=str(payload.get("name") or f"reflex/{node['hash'][:8]}"),
+                    chain=tuple(str(item) for item in payload.get("chain", ())),
+                    signature=str(payload.get("signature") or ""),
+                    support=len(edges) or int(payload.get("support", 0)),
+                    fused_operator=str(payload.get("fused_operator") or ""),
+                    expected_gates=tuple(str(item) for item in payload.get("expected_gates", ())),
+                    task_signatures=tuple(
+                        str(item) for item in payload.get("task_signatures", ()) if isinstance(item, str)
+                    ),
+                    eta_mean=float(raw_eta) if raw_eta is not None else None,
+                )
+            )
+        return sorted(
+            compiled,
+            key=lambda reflex: (reflex.support, len(reflex.expected_gates), reflex.name),
+            reverse=True,
+        )
+
+    def match_operator_chain(
+        self,
+        chain: Sequence[str],
+        *,
+        task: str | None = None,
+    ) -> CompiledOperatorReflex | None:
+        """Find an exact deterministic reflex for an extern-op chain."""
+        wanted = tuple(str(item) for item in chain)
+        signature = task_signature(task) if task is not None else None
+        for reflex in self.operator_reflexes():
+            if reflex.chain != wanted:
+                continue
+            if signature is not None and signature not in reflex.task_signatures:
+                continue
+            return reflex
+        return None
+
+    def best_analogy(
+        self, signature: StructuralSignature, min_similarity: float = 0.72
+    ) -> AnalogyMatch | None:
+        """Recall a structurally similar strategy from MERA L1/L2 memory."""
+        return self.graph.best_analogy(signature, min_similarity=min_similarity)
+
+    def analogical_hint(
+        self,
+        coupling_matrix: Any,
+        *,
+        num_modules: int,
+        num_imports: int,
+        num_functions: int,
+        num_gates: int,
+        min_similarity: float = 0.72,
+    ) -> AnalogyMatch | None:
+        """Encode a workspace and query structural analogues in one step."""
+        signature = self.graph.encode_signature(
+            coupling_matrix,
+            num_modules=num_modules,
+            num_imports=num_imports,
+            num_functions=num_functions,
+            num_gates=num_gates,
+        )
+        return self.best_analogy(signature, min_similarity=min_similarity)
 
     # -- loading ------------------------------------------------------------
     def _outcomes(self) -> dict[str, list[bool]]:
@@ -300,6 +638,12 @@ class ReflexLibrary:
                 continue
             history = outcomes.get(node["hash"], [])
             rules = self.graph.sources(node["hash"], "compiled_into")
+            hits = sum(1 for ok in history if ok)
+            misses = sum(1 for ok in history if not ok)
+            support = len(self.graph.sources(node["hash"], "compiled_from"))
+            created_at = node.get("created_at")
+            elapsed_hours = max(0.0, time.time() - float(created_at)) / 3600.0 if created_at else 0.0
+            age_steps = max(0, len(history) - hits) + int(elapsed_hours) + int(self.decay.surprise_ema * 2)
             compiled.append(
                 CompiledReflex(
                     hash=node["hash"],
@@ -307,28 +651,50 @@ class ReflexLibrary:
                     edits=edits,
                     expected_gates=tuple(str(g) for g in payload.get("expected_gates", [])),
                     pattern=tuple(str(feature) for feature in payload.get("pattern", [])),
-                    support=len(self.graph.sources(node["hash"], "compiled_from")),
+                    support=support,
                     rule=rules[0] if rules else "",
-                    hits=sum(1 for ok in history if ok),
-                    misses=sum(1 for ok in history if not ok),
+                    hits=hits,
+                    misses=misses,
+                    task_signatures=tuple(
+                        str(item) for item in payload.get("task_signatures", ()) if isinstance(item, str)
+                    ),
+                    confidence=self.decay.confidence(
+                        support=support, hits=hits, misses=misses, age_steps=age_steps
+                    ),
+                    created_at=created_at,
                 )
             )
-        return sorted(compiled, key=lambda reflex: (len(reflex.expected_gates), reflex.support), reverse=True)
+        return sorted(
+            compiled,
+            key=lambda reflex: (reflex.confidence, len(reflex.expected_gates), reflex.support),
+            reverse=True,
+        )
 
     # -- execution ----------------------------------------------------------
-    def match(self, root: str | Path) -> CompiledReflex | None:
-        """Best live reflex whose learned pre-states all still hold, if any."""
+    def match(
+        self,
+        root: str | Path,
+        *,
+        task: str | None = None,
+        context: Mapping[str, Any] | None = None,
+    ) -> CompiledReflex | None:
+        """Best live reflex whose task and learned pre-states all still hold."""
+        requested_task = task if task is not None else (context or {}).get("task")
+        signature = task_signature(str(requested_task)) if requested_task is not None else None
         best: CompiledReflex | None = None
+        best_score = (-1.0, -1, -1)
         for reflex in self.reflexes():
-            if reflex.misses >= self.miss_limit:
+            # No binary active/retired flag: confidence is a continuous weight
+            # combining recency, surprise and the synaptic fast weight.
+            if reflex.confidence < self.confidence_threshold:
+                continue
+            if signature is not None and signature not in reflex.task_signatures:
                 continue
             if not all(edit.accepts(root) for edit in reflex.edits):
                 continue
-            if best is None or (len(reflex.expected_gates), reflex.support) > (
-                len(best.expected_gates),
-                best.support,
-            ):
-                best = reflex
+            score = (reflex.confidence, len(reflex.expected_gates), reflex.support)
+            if best is None or score > best_score:
+                best, best_score = reflex, score
         return best
 
     def record(
@@ -339,7 +705,9 @@ class ReflexLibrary:
         eta_cog: float | None = None,
         parent_hash: str | None = None,
     ) -> str:
-        """Archive the outcome; the sink stays the single source of truth."""
+        """Archive the outcome and fade confidence on surprise or failure."""
+        surprise = abs(float(eta_cog)) if eta_cog is not None else (0.0 if ok else 1.0)
+        self.decay.observe(ok=ok, surprise=surprise)
         return self.graph.sink.put(
             "reflex_outcome",
             {
@@ -348,6 +716,8 @@ class ReflexLibrary:
                 "ok": bool(ok),
                 "tick": parent_hash,
                 "eta_cog": None if eta_cog is None else round(float(eta_cog), 6),
+                "surprise_ema": round(self.decay.surprise_ema, 6),
+                "fast_weight": round(self.decay.fast_weight, 6),
             },
             scale=0,
             parent_hash=parent_hash,
